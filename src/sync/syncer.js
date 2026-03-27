@@ -1,5 +1,9 @@
 import { EmbedBuilder } from 'discord.js';
 
+const DATE_ONLY_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+const DATETIME_REGEX = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
+const SUPPORT_FOOTER_TEXT = 'Need help? Contact on IG: dda.day or on Discord.';
+
 /**
  * Normalizes values so comparisons are deterministic.
  */
@@ -86,64 +90,23 @@ function detectChanges(oldCard, newCard, firstCheck = false) {
   return changes;
 }
 
-/**
- * Formats a change into a human-readable string
- */
-function formatChangeSummary(propName, change) {
-  const formatDateTimeText = (value) => {
-    if (typeof value !== 'string') {
-      return null;
-    }
-
-    // Date only: 2026-03-28
-    if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
-      return value;
-    }
-
-    // Date-time: 2026-03-28T20:00:00.000+07:00 -> 2026-03-28 20:00
-    if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(value)) {
-      return `${value.slice(0, 10)} ${value.slice(11, 16)}`;
-    }
-
+function formatDateTimeText(value) {
+  if (typeof value !== 'string') {
     return null;
-  };
-
-  const formatValue = (val) => {
-    if (Array.isArray(val)) return val.join(', ') || 'None';
-    if (val === null || val === undefined) return 'None';
-    if (typeof val === 'object') return JSON.stringify(val);
-    const formattedDate = formatDateTimeText(val);
-    if (formattedDate) return formattedDate;
-    return String(val);
-  };
-
-  const old = formatValue(change.old);
-  const newVal = formatValue(change.new);
-
-  return `**${propName}**: ${old} → ${newVal}`;
-}
-
-function formatFieldValue(value) {
-  const formatDateTimeText = (raw) => {
-    if (typeof raw !== 'string') {
-      return null;
-    }
-
-    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
-      return raw;
-    }
-
-    if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(raw)) {
-      return `${raw.slice(0, 10)} ${raw.slice(11, 16)}`;
-    }
-
-    return null;
-  };
-
-  if (Array.isArray(value)) {
-    return value.join(', ') || 'None';
   }
 
+  if (DATE_ONLY_REGEX.test(value)) {
+    return value;
+  }
+
+  if (DATETIME_REGEX.test(value)) {
+    return `${value.slice(0, 10)} ${value.slice(11, 16)}`;
+  }
+
+  return null;
+}
+
+function formatScalarValue(value) {
   if (value === null || value === undefined || value === '') {
     return 'None';
   }
@@ -154,6 +117,30 @@ function formatFieldValue(value) {
   }
 
   return String(value);
+}
+
+/**
+ * Formats a change into a human-readable string
+ */
+function formatChangeSummary(propName, change) {
+  const formatValue = (val) => {
+    if (Array.isArray(val)) return val.join(', ') || 'None';
+    if (typeof val === 'object') return JSON.stringify(val);
+    return formatScalarValue(val);
+  };
+
+  const old = formatValue(change.old);
+  const newVal = formatValue(change.new);
+
+  return `**${propName}**: ${old} → ${newVal}`;
+}
+
+function formatFieldValue(value) {
+  if (Array.isArray(value)) {
+    return value.join(', ') || 'None';
+  }
+
+  return formatScalarValue(value);
 }
 
 function truncateFieldValue(value, maxLength = 1024) {
@@ -195,6 +182,10 @@ function addCommonFields(embed, cardData) {
   );
 }
 
+function addSupportFooter(embed) {
+  embed.setFooter({ text: SUPPORT_FOOTER_TEXT });
+}
+
 function getCardName(card) {
   let cardName = card?.properties?.['กิจกรรม'];
 
@@ -207,13 +198,48 @@ function getCardName(card) {
   return cardName || `Card ${card.id.substring(0, 8)}`;
 }
 
+function normalizeStatusText(value) {
+  if (typeof value !== 'string') {
+    return '';
+  }
+
+  return value.trim().toLowerCase().replace(/[\s_-]+/g, ' ');
+}
+
+function getColorByStatus(changes) {
+  const statusEntry = Object.entries(changes).find(([key]) => key.toLowerCase().includes('status'));
+  if (!statusEntry) {
+    return 0x5865F2; // Blurple for non-status changes
+  }
+
+  const [, statusChange] = statusEntry;
+  const normalizedNextStatus = normalizeStatusText(statusChange?.new);
+
+  if (normalizedNextStatus === 'in progress') {
+    return 0x4FC3F7; // Sky blue
+  }
+
+  if (normalizedNextStatus === 'in review') {
+    return 0xF5A623; // Yellow-orange
+  }
+
+  if (normalizedNextStatus === 'done') {
+    return 0x2ECC71; // Green
+  }
+
+  if (normalizedNextStatus === 'not started') {
+    return 0x95A5A6; // Gray
+  }
+
+  return 0x5865F2;
+}
+
 /**
  * Creates a Discord embed for property changes.
  */
 function createChangeEmbed(cardName, cardUrl, changes, cardData) {
   const changedEntries = Object.entries(changes);
-  const hasStatusChange = changedEntries.some(([key]) => key.toLowerCase() === 'status');
-  const color = hasStatusChange ? 0x00AA44 : 0xF39C12;
+  const color = getColorByStatus(changes);
 
   const embed = new EmbedBuilder()
     .setTitle(`📋 ${cardName || 'Task Updated'}`)
@@ -233,6 +259,7 @@ function createChangeEmbed(cardName, cardUrl, changes, cardData) {
 
   embed.setDescription(summaryLines.join('\n'));
   addCommonFields(embed, cardData);
+  addSupportFooter(embed);
 
   return embed;
 }
@@ -241,11 +268,12 @@ function createCreatedEmbed(cardName, cardUrl, cardData) {
   const embed = new EmbedBuilder()
     .setTitle(`🆕 ${cardName || 'Task Created'}`)
     .setURL(cardUrl)
-    .setColor(0x3498DB)
+    .setColor(0x9B59B6)
     .setDescription('New card created in Notion database')
     .setTimestamp();
 
   addCommonFields(embed, cardData);
+  addSupportFooter(embed);
 
   return embed;
 }
@@ -254,11 +282,12 @@ function createRemovedEmbed(cardName, cardUrl, cardData) {
   const embed = new EmbedBuilder()
     .setTitle(`🗑️ ${cardName || 'Task Removed'}`)
     .setURL(cardUrl)
-    .setColor(0xE74C3C)
+    .setColor(0xFF3B30)
     .setDescription('Card removed from Notion database')
     .setTimestamp();
 
   addCommonFields(embed, cardData);
+  addSupportFooter(embed);
 
   return embed;
 }
@@ -272,6 +301,8 @@ export function findChangedCards(oldState, newCards) {
   const createdCards = [];
   const deletedCards = [];
   const oldCardIds = oldState.getAllCardIds();
+  // Set lookup keeps deletion detection O(n) instead of O(n^2).
+  const newCardIdSet = new Set(newCards.map(card => card.id));
   const isInitialSync = oldCardIds.length === 0;
   let skippedNewCards = 0;
   let isFirstCard = true;
@@ -280,6 +311,7 @@ export function findChangedCards(oldState, newCards) {
     const oldCard = oldState.getCardState(newCard.id);
 
     if (!oldCard) {
+      // Initial import becomes baseline; later unseen cards are true "created" events.
       if (isInitialSync) {
         skippedNewCards += 1;
       } else {
@@ -306,7 +338,7 @@ export function findChangedCards(oldState, newCards) {
   // Detect deleted cards
   const deletedCardIds = [];
   for (const oldCardId of oldCardIds) {
-    if (!newCards.find(c => c.id === oldCardId)) {
+    if (!newCardIdSet.has(oldCardId)) {
       deletedCardIds.push(oldCardId);
 
       const removedCard = oldState.getCardState(oldCardId);

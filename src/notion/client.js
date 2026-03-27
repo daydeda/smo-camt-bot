@@ -3,6 +3,7 @@ import config from '../config.js';
 
 const notion = new NotionClient({
   auth: config.notion.apiKey,
+  timeoutMs: 15000,
 });
 
 export default notion;

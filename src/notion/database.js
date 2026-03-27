@@ -24,6 +24,7 @@ function extractPageTitleFromProperties(properties) {
 }
 
 async function getPageTitle(pageId, titleCache) {
+  // Avoid repeated API calls when multiple cards point to the same relation page.
   if (titleCache.has(pageId)) {
     return titleCache.get(pageId);
   }
@@ -78,7 +79,7 @@ function extractFormulaValue(formula) {
 /**
  * Extracts value from Notion property based on type
  */
-function extractPropertyValue(property) {
+async function extractPropertyValue(property, titleCache) {
   if (!property) return null;
 
   switch (property.type) {
@@ -99,7 +100,8 @@ function extractPropertyValue(property) {
     case 'formula':
       return extractFormulaValue(property.formula);
     case 'relation':
-      return [];
+      // Relations store page IDs; we resolve and keep only human-friendly titles.
+      return extractRelationTitles(property.relation, titleCache);
     case 'url':
       return property.url || null;
     case 'number':
@@ -137,14 +139,7 @@ export async function fetchDatabaseCards() {
 
         // Extract all properties from the page
         for (const [propName, propValue] of Object.entries(page.properties)) {
-          if (propValue?.type === 'relation') {
-            cardData.properties[propName] = await extractRelationTitles(
-              propValue.relation,
-              relationTitleCache
-            );
-          } else {
-            cardData.properties[propName] = extractPropertyValue(propValue);
-          }
+          cardData.properties[propName] = await extractPropertyValue(propValue, relationTitleCache);
         }
 
         // Log first card's properties for debugging

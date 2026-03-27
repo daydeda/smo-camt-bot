@@ -4,7 +4,6 @@ import config from '../config.js';
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.DirectMessages,
   ],
 });
 

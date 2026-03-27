@@ -164,12 +164,26 @@ Edit `src/sync/syncer.js` line with `.setColor()` to change notification colors:
 
 ## Deployment
 
-### Deploy to Railway/Heroku/Replit
+### Free Options (Always-on)
+
+1. **Koyeb (recommended free tier)**
+2. **Render free web service with periodic pings** (free tier may sleep)
+3. **Fly.io** (good free credits in some regions)
+
+### Deploy to Koyeb (easy)
 
 1. Push code to GitHub
-2. Connect to your hosting platform
-3. Set environment variables
-4. Deploy!
+2. Create a Koyeb app from repository
+3. Set Start Command to `npm start`
+4. Add environment variables from `.env.example`
+5. Deploy and verify logs
+
+### Security Tips for Deployment
+
+1. Never commit `.env` or tokens.
+2. Rotate Discord/Notion tokens if they were ever exposed.
+3. Use least privilege: Discord bot only needs guild-level messaging permissions.
+4. Keep `POLL_INTERVAL` at 60+ seconds unless you need faster updates.
 
 ### Docker (optional)
 
