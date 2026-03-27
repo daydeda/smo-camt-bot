@@ -4,6 +4,8 @@ const DATE_ONLY_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 const DATETIME_REGEX = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
 const SUPPORT_FOOTER_TEXT = 'Need help? Contact on IG: dda.day or on Discord.';
 const STATUS_BUCKETS = ['notStarted', 'inProgress', 'inReview', 'done'];
+const CALENDAR_MAX_LINES = 20;
+const CALENDAR_DESCRIPTION_MAX_LENGTH = 3500;
 
 /**
  * Normalizes values so comparisons are deterministic.
@@ -386,6 +388,235 @@ function isDueInOneDay(deadlineRaw, deadlineDate, statusBucket, now, nowDateOnly
   return reminderDate.getTime() === nowDateOnly.getTime();
 }
 
+function formatDateRangeLabel(start, endExclusive) {
+  const end = new Date(endExclusive.getFullYear(), endExclusive.getMonth(), endExclusive.getDate() - 1);
+  return `${formatDateLabel(start)} - ${formatDateLabel(end)}`;
+}
+
+function getRangeStart(range, now) {
+  const today = toDateOnly(now);
+
+  if (range === 'today') {
+    return today;
+  }
+
+  if (range === 'month') {
+    return new Date(today.getFullYear(), today.getMonth(), 1);
+  }
+
+  const weekday = today.getDay();
+  const diffToMonday = (weekday + 6) % 7;
+  return new Date(today.getFullYear(), today.getMonth(), today.getDate() - diffToMonday);
+}
+
+function getRangeEndExclusive(range, rangeStart) {
+  if (range === 'today') {
+    return new Date(rangeStart.getFullYear(), rangeStart.getMonth(), rangeStart.getDate() + 1);
+  }
+
+  if (range === 'month') {
+    return new Date(rangeStart.getFullYear(), rangeStart.getMonth() + 1, 1);
+  }
+
+  return new Date(rangeStart.getFullYear(), rangeStart.getMonth(), rangeStart.getDate() + 7);
+}
+
+function isDeadlineInsideRange(deadlineRaw, deadlineDate, rangeStart, rangeEndExclusive) {
+  if (!deadlineDate) {
+    return false;
+  }
+
+  if (isDateTimeValue(deadlineRaw)) {
+    const ms = deadlineDate.getTime();
+    return ms >= rangeStart.getTime() && ms < rangeEndExclusive.getTime();
+  }
+
+  const deadlineDateOnly = toDateOnly(deadlineDate);
+  const ms = deadlineDateOnly.getTime();
+  return ms >= rangeStart.getTime() && ms < rangeEndExclusive.getTime();
+}
+
+function getStatusLabel(statusValue) {
+  const normalized = mapStatusBucket(statusValue);
+
+  if (normalized === 'notStarted') return 'Not Started';
+  if (normalized === 'inProgress') return 'In Progress';
+  if (normalized === 'inReview') return 'In Review';
+  if (normalized === 'done') return 'Done';
+
+  if (typeof statusValue === 'string' && statusValue.trim()) {
+    return statusValue.trim();
+  }
+
+  return 'Unknown';
+}
+
+function buildCalendarLines(cardsInRange) {
+  return cardsInRange.map(item => {
+    const statusText = getStatusLabel(getStatusValue(item.card.properties || {}));
+    const dueText = formatFieldValue(item.deadlineRaw || '');
+    const taskName = getCardName(item.card);
+    return `• ${dueText} | ${statusText} | ${taskName}`;
+  });
+}
+
+function getCardsInRange(cards, normalizedRange, now) {
+  const rangeStart = getRangeStart(normalizedRange, now);
+  const rangeEndExclusive = getRangeEndExclusive(normalizedRange, rangeStart);
+  const cardsInRange = [];
+
+  for (const card of cards) {
+    const properties = card?.properties || {};
+    const deadlineRaw = getDeadlineValue(properties);
+    const deadlineDate = parseNotionDate(deadlineRaw);
+
+    if (!isDeadlineInsideRange(deadlineRaw, deadlineDate, rangeStart, rangeEndExclusive)) {
+      continue;
+    }
+
+    cardsInRange.push({
+      card,
+      deadlineRaw,
+      deadlineDate,
+      statusValue: getStatusValue(properties),
+    });
+  }
+
+  cardsInRange.sort((a, b) => a.deadlineDate.getTime() - b.deadlineDate.getTime());
+
+  return {
+    cardsInRange,
+    rangeStart,
+    rangeEndExclusive,
+  };
+}
+
+function createCalendarSummaryEmbed(cardsInRange, normalizedRange, now, rangeStart, rangeEndExclusive, options = {}) {
+  const titleByRange = {
+    today: '📅 Calendar: Today',
+    week: '📅 Calendar: This Week',
+    month: '📅 Monthly Overview',
+  };
+
+  const headerText = options.title || titleByRange[normalizedRange];
+  const rangeLabel = formatDateRangeLabel(rangeStart, rangeEndExclusive);
+  const lines = buildCalendarLines(cardsInRange);
+  const visibleLines = lines.slice(0, CALENDAR_MAX_LINES);
+
+  const statusCounts = {
+    notStarted: 0,
+    inProgress: 0,
+    inReview: 0,
+    done: 0,
+    unknown: 0,
+  };
+
+  for (const item of cardsInRange) {
+    const bucket = mapStatusBucket(item.statusValue);
+    if (bucket && Object.hasOwn(statusCounts, bucket)) {
+      statusCounts[bucket] += 1;
+    } else {
+      statusCounts.unknown += 1;
+    }
+  }
+
+  const embed = new EmbedBuilder()
+    .setTitle(`${headerText} (${rangeLabel})`)
+    .setColor(0x2D7D9A)
+    .setTimestamp(now)
+    .addFields(
+      { name: 'Total Scheduled Tasks', value: String(cardsInRange.length), inline: true },
+      { name: 'Range', value: normalizedRange, inline: true },
+      { name: 'Not Started', value: String(statusCounts.notStarted), inline: true },
+      { name: 'In Progress', value: String(statusCounts.inProgress), inline: true },
+      { name: 'In Review', value: String(statusCounts.inReview), inline: true },
+      { name: 'Done', value: String(statusCounts.done), inline: true }
+    );
+
+  if (visibleLines.length === 0) {
+    embed.setDescription('No scheduled tasks in this range.');
+  } else {
+    const extraCount = lines.length - visibleLines.length;
+    const suffix = extraCount > 0 ? `\n...and ${extraCount} more task(s)` : '';
+    embed.setDescription(`${visibleLines.join('\n')}${suffix}`);
+  }
+
+  addSupportFooter(embed);
+  return embed;
+}
+
+function createCalendarDetailedEmbed(cardsInRange, normalizedRange, now, rangeStart, rangeEndExclusive) {
+  const titleByRange = {
+    today: '🗂️ Detailed Schedule: Today',
+    week: '🗂️ Detailed Schedule: This Week',
+    month: '🗂️ Detailed Schedule: This Month',
+  };
+
+  const grouped = new Map();
+  for (const item of cardsInRange) {
+    const key = formatFieldValue(item.deadlineRaw || 'None');
+    if (!grouped.has(key)) {
+      grouped.set(key, []);
+    }
+
+    grouped.get(key).push(item);
+  }
+
+  const sections = [];
+  for (const [dueText, items] of grouped.entries()) {
+    const lines = items.map(item => {
+      const statusText = getStatusLabel(item.statusValue);
+      const taskName = getCardName(item.card);
+      return `- [${taskName}](${item.card.url}) (${statusText})`;
+    });
+
+    sections.push(`**${dueText}**\n${lines.join('\n')}`);
+  }
+
+  let description = sections.join('\n\n');
+  if (!description) {
+    description = 'No scheduled tasks in this range.';
+  } else if (description.length > CALENDAR_DESCRIPTION_MAX_LENGTH) {
+    description = `${description.slice(0, CALENDAR_DESCRIPTION_MAX_LENGTH - 3)}...`;
+  }
+
+  const embed = new EmbedBuilder()
+    .setTitle(`${titleByRange[normalizedRange]} (${formatDateRangeLabel(rangeStart, rangeEndExclusive)})`)
+    .setColor(0x1B4F72)
+    .setDescription(description)
+    .setTimestamp(now);
+
+  addSupportFooter(embed);
+  return embed;
+}
+
+export function createCalendarOverviewEmbeds(cards, range = 'week', now = new Date(), options = {}) {
+  const normalizedRange = ['today', 'week', 'month'].includes(range) ? range : 'week';
+  const { cardsInRange, rangeStart, rangeEndExclusive } = getCardsInRange(cards, normalizedRange, now);
+
+  const summaryEmbed = createCalendarSummaryEmbed(
+    cardsInRange,
+    normalizedRange,
+    now,
+    rangeStart,
+    rangeEndExclusive,
+    options
+  );
+  const detailedEmbed = createCalendarDetailedEmbed(
+    cardsInRange,
+    normalizedRange,
+    now,
+    rangeStart,
+    rangeEndExclusive
+  );
+
+  return [summaryEmbed, detailedEmbed];
+}
+
+export function createCalendarOverviewEmbed(cards, range = 'week', now = new Date(), options = {}) {
+  return createCalendarOverviewEmbeds(cards, range, now, options)[0];
+}
+
 export function buildDailyReportSummary(cards, now = new Date()) {
   const counts = {
     notStarted: 0,
@@ -684,4 +915,6 @@ export default {
   createDailyReportEmbed,
   createDeadlineReminderEmbeds,
   buildDailyReportSummary,
+  createCalendarOverviewEmbeds,
+  createCalendarOverviewEmbed,
 };

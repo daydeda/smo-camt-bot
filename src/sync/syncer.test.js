@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildDailyReportSummary, createDeadlineReminderEmbeds } from './syncer.js';
+import {
+  buildDailyReportSummary,
+  createDeadlineReminderEmbeds,
+  createCalendarOverviewEmbeds,
+  createCalendarOverviewEmbed,
+} from './syncer.js';
 
 function makeCard(id, status, date, department = 'Ops') {
   return {
@@ -119,4 +124,40 @@ test('createDeadlineReminderEmbeds handles datetime deadlines for one-day and ov
 
   assert.equal(overdueResult.embeds.length, 1);
   assert.match(overdueResult.embeds[0].data.description, /overdue/i);
+});
+
+test('createCalendarOverviewEmbed returns week tasks with DD-MM-YYYY dates', () => {
+  const now = new Date(2026, 2, 28, 10, 0, 0);
+  const cards = [
+    makeCard('1', 'In Progress', '2026-03-24', 'Operations'),
+    makeCard('2', 'Done', '2026-03-31', 'Operations'),
+    makeCard('3', 'Not Started', '2026-03-20', 'Operations'),
+  ];
+
+  const embed = createCalendarOverviewEmbed(cards, 'week', now);
+  assert.match(embed.data.title, /Calendar: This Week/i);
+  assert.match(embed.data.description, /24-03-2026/);
+  assert.doesNotMatch(embed.data.description, /31-03-2026/);
+});
+
+test('createCalendarOverviewEmbeds returns summary and detailed embeds', () => {
+  const now = new Date(2026, 2, 28, 10, 0, 0);
+  const cards = [
+    makeCard('1', 'In Progress', '2026-03-24', 'Operations'),
+  ];
+
+  const embeds = createCalendarOverviewEmbeds(cards, 'week', now);
+  assert.equal(embeds.length, 2);
+  assert.match(embeds[0].data.title, /Calendar: This Week/i);
+  assert.match(embeds[1].data.title, /Detailed Schedule/i);
+});
+
+test('createCalendarOverviewEmbed month range includes month title', () => {
+  const now = new Date(2026, 2, 28, 10, 0, 0);
+  const cards = [
+    makeCard('1', 'In Progress', '2026-03-24', 'Operations'),
+  ];
+
+  const embed = createCalendarOverviewEmbed(cards, 'month', now, { title: '📅 Monthly Overview' });
+  assert.match(embed.data.title, /Monthly Overview/);
 });

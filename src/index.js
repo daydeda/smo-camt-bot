@@ -1,4 +1,7 @@
 import discordClient from './discord/bot.js';
+import { PermissionFlagsBits } from 'discord.js';
+import fs from 'fs';
+import path from 'path';
 import { fetchDatabaseCards, formatCardForTracking } from './notion/database.js';
 import stateTracker from './sync/tracker.js';
 import {
@@ -6,12 +9,71 @@ import {
   createChangeEmbeds,
   createCreatedEmbeds,
   createRemovedEmbeds,
-  createDailyReportEmbed,
   createDeadlineReminderEmbeds,
+  createCalendarOverviewEmbeds,
 } from './sync/syncer.js';
 import config from './config.js';
 
 let isRunning = false;
+const PROCESS_LOCK_FILE = path.join(process.cwd(), '.notionbot.lock');
+
+function isProcessAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return false;
+  }
+
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function readLockPid() {
+  try {
+    const raw = fs.readFileSync(PROCESS_LOCK_FILE, 'utf8').trim();
+    const pid = Number.parseInt(raw, 10);
+    return Number.isNaN(pid) ? null : pid;
+  } catch {
+    return null;
+  }
+}
+
+function acquireProcessLock() {
+  try {
+    fs.writeFileSync(PROCESS_LOCK_FILE, String(process.pid), { flag: 'wx' });
+    return;
+  } catch {
+    const existingPid = readLockPid();
+    if (existingPid && isProcessAlive(existingPid)) {
+      throw new Error(`Another bot instance is already running (PID ${existingPid}).`);
+    }
+
+    try {
+      fs.unlinkSync(PROCESS_LOCK_FILE);
+    } catch {
+      // Ignore stale lock cleanup errors and retry lock creation below.
+    }
+
+    fs.writeFileSync(PROCESS_LOCK_FILE, String(process.pid), { flag: 'wx' });
+  }
+}
+
+function releaseProcessLock() {
+  try {
+    if (!fs.existsSync(PROCESS_LOCK_FILE)) {
+      return;
+    }
+
+    const lockPid = readLockPid();
+    if (lockPid === process.pid) {
+      fs.unlinkSync(PROCESS_LOCK_FILE);
+    }
+  } catch {
+    // Best-effort cleanup.
+  }
+}
 
 function normalizeLookupText(value) {
   if (typeof value !== 'string') {
@@ -105,6 +167,16 @@ function formatConfiguredChannelsMentionText() {
   return config.discord.channelIds.map(channelId => `<#${channelId}>`).join(', ');
 }
 
+function getMonthKey(date) {
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  return `${date.getFullYear()}-${month}`;
+}
+
+function isAdminInteraction(interaction) {
+  const permissions = interaction.memberPermissions;
+  return Boolean(permissions?.has(PermissionFlagsBits.Administrator));
+}
+
 async function fetchConfiguredChannels() {
   const channels = [];
 
@@ -125,7 +197,46 @@ async function fetchConfiguredChannels() {
   return channels;
 }
 
-async function sendEmbedsToChannel(channel, embeds) {
+function collectRoleMentionsFromEmbeds(embeds) {
+  const mentionSet = new Set();
+
+  for (const embed of embeds) {
+    const roleMentions = extractRoleMentionsFromEmbed(embed);
+    for (const mention of roleMentions) {
+      mentionSet.add(mention);
+    }
+  }
+
+  return Array.from(mentionSet);
+}
+
+async function sendEmbedsToChannel(channel, embeds, options = {}) {
+  const { singleMessage = false } = options;
+
+  if (singleMessage) {
+    const chunks = [];
+    for (let i = 0; i < embeds.length; i += 10) {
+      chunks.push(embeds.slice(i, i + 10));
+    }
+
+    for (const chunk of chunks) {
+      const roleMentions = collectRoleMentionsFromEmbeds(chunk);
+      const roleIds = extractRoleIdsFromMentions(roleMentions);
+
+      await channel.send({
+        content: roleMentions.join(' '),
+        embeds: chunk,
+        allowedMentions: {
+          parse: [],
+          roles: roleIds,
+        },
+      });
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+
+    return;
+  }
+
   for (const embed of embeds) {
     const roleMentions = extractRoleMentionsFromEmbed(embed);
     const roleIds = extractRoleIdsFromMentions(roleMentions);
@@ -139,19 +250,6 @@ async function sendEmbedsToChannel(channel, embeds) {
       },
     });
     await new Promise(resolve => setTimeout(resolve, 500));
-  }
-}
-
-async function runDailyReport(channels) {
-  const cards = await fetchDatabaseCards();
-  const formattedCards = cards.map(formatCardForTracking);
-  const trackedCards = filterCardsByTrackedOrganization(formattedCards);
-  for (const channel of channels) {
-    const embed = createDailyReportEmbed(trackedCards, new Date());
-    embed.setDescription(
-      `Summary of current task statuses from Notion\nTracking Organization: **${config.sync.trackedOrganization}** (${trackedCards.length} card(s))`
-    );
-    await sendEmbedsToChannel(channel, [embed]);
   }
 }
 
@@ -183,6 +281,74 @@ async function runReminderCheck(channels) {
   return reminderCounts;
 }
 
+async function runCalendarOverview(channels, range = 'week', now = new Date()) {
+  const cards = await fetchDatabaseCards();
+  const formattedCards = cards.map(formatCardForTracking);
+  const trackedCards = filterCardsByTrackedOrganization(formattedCards);
+
+  for (const channel of channels) {
+    const embeds = createCalendarOverviewEmbeds(trackedCards, range, now);
+    await sendEmbedsToChannel(channel, embeds, { singleMessage: true });
+  }
+}
+
+async function runMonthlyOverview(channels, now = new Date()) {
+  const cards = await fetchDatabaseCards();
+  const formattedCards = cards.map(formatCardForTracking);
+  const trackedCards = filterCardsByTrackedOrganization(formattedCards);
+
+  for (const channel of channels) {
+    const embeds = createCalendarOverviewEmbeds(trackedCards, 'month', now, {
+      title: '📅 Monthly Overview',
+    });
+    await sendEmbedsToChannel(channel, embeds, { singleMessage: true });
+  }
+}
+
+async function clearChannelMessages(channel) {
+  const MAX_FETCH = 100;
+  const BULK_DELETE_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
+  let deletedCount = 0;
+
+  while (true) {
+    const messages = await channel.messages.fetch({ limit: MAX_FETCH });
+    if (messages.size === 0) {
+      break;
+    }
+
+    const deletable = Array.from(messages.values()).filter(message => !message.pinned);
+    if (deletable.length === 0) {
+      break;
+    }
+
+    const nowMs = Date.now();
+    const recentMessages = deletable.filter(
+      message => nowMs - message.createdTimestamp < BULK_DELETE_WINDOW_MS
+    );
+    const olderMessages = deletable.filter(
+      message => nowMs - message.createdTimestamp >= BULK_DELETE_WINDOW_MS
+    );
+
+    if (recentMessages.length > 0) {
+      const deleted = await channel.bulkDelete(recentMessages, true);
+      deletedCount += deleted.size;
+    }
+
+    for (const message of olderMessages) {
+      try {
+        await message.delete();
+        deletedCount += 1;
+      } catch {
+        // Ignore undeletable messages and keep clearing remaining messages.
+      }
+    }
+
+    await new Promise(resolve => setTimeout(resolve, 300));
+  }
+
+  return deletedCount;
+}
+
 async function registerSlashCommands(channel) {
   const guild = channel?.guild;
   if (!guild) {
@@ -191,12 +357,29 @@ async function registerSlashCommands(channel) {
 
   const requiredCommands = [
     {
-      name: 'dailyreport',
-      description: 'Generate and send a daily report for Notion tasks',
-    },
-    {
       name: 'remindercheck',
       description: 'Run deadline reminder check now and send due/overdue reminders',
+    },
+    {
+      name: 'calendar',
+      description: 'Post calendar overview for today, week, or month',
+      options: [
+        {
+          name: 'range',
+          description: 'Select calendar range',
+          type: 3,
+          required: true,
+          choices: [
+            { name: 'today', value: 'today' },
+            { name: 'week', value: 'week' },
+            { name: 'month', value: 'month' },
+          ],
+        },
+      ],
+    },
+    {
+      name: 'clear',
+      description: 'Admin only: clear all messages in this configured channel',
     },
   ];
 
@@ -216,7 +399,11 @@ function registerCommandHandlers() {
       return;
     }
 
-    if (interaction.commandName !== 'dailyreport' && interaction.commandName !== 'remindercheck') {
+    if (
+      interaction.commandName !== 'remindercheck' &&
+      interaction.commandName !== 'calendar' &&
+      interaction.commandName !== 'clear'
+    ) {
       return;
     }
 
@@ -230,22 +417,33 @@ function registerCommandHandlers() {
 
     try {
       await interaction.deferReply({ ephemeral: true });
-      const configuredChannels = await fetchConfiguredChannels();
-      if (configuredChannels.length === 0) {
-        throw new Error('No configured text channels are available.');
+      const commandChannel = interaction.channel || await discordClient.channels.fetch(interaction.channelId);
+      if (!commandChannel || typeof commandChannel.send !== 'function') {
+        throw new Error('This command can only be used in a text channel.');
       }
 
-      if (interaction.commandName === 'dailyreport') {
-        await runDailyReport(configuredChannels);
-        await interaction.editReply(`Daily report sent to ${configuredChannels.length} channel(s).`);
-      }
+      const targetChannels = [commandChannel];
 
       if (interaction.commandName === 'remindercheck') {
-        const reminderCounts = await runReminderCheck(configuredChannels);
+        const reminderCounts = await runReminderCheck(targetChannels);
         const totalReminderCount = reminderCounts.reduce((sum, count) => sum + count, 0);
-        await interaction.editReply(
-          `Reminder check completed. Sent ${totalReminderCount} reminder(s) across ${configuredChannels.length} channel(s).`
-        );
+        await interaction.editReply(`Reminder check completed. Sent ${totalReminderCount} reminder(s).`);
+      }
+
+      if (interaction.commandName === 'calendar') {
+        const range = interaction.options.getString('range', true);
+        await runCalendarOverview(targetChannels, range, new Date());
+        await interaction.editReply(`Calendar overview (${range}) posted.`);
+      }
+
+      if (interaction.commandName === 'clear') {
+        if (!isAdminInteraction(interaction)) {
+          await interaction.editReply('This command is admin-only.');
+          return;
+        }
+
+        const deletedCount = await clearChannelMessages(commandChannel);
+        await interaction.editReply(`Cleared ${deletedCount} message(s) from this channel.`);
       }
     } catch (error) {
       console.error('Error running slash command:', error.message);
@@ -369,6 +567,14 @@ async function syncNotionToDiscord() {
       }
 
       stateTracker.setMeta('deadlineReminderByCardId', primaryReminderResult.reminderStateByCardId);
+
+      const currentMonthKey = getMonthKey(now);
+      const lastMonthlyOverviewKey = stateTracker.getMeta('monthlyOverviewLastSentKey', null);
+      if (now.getDate() === 1 && lastMonthlyOverviewKey !== currentMonthKey) {
+        await runMonthlyOverview(channels, now);
+        stateTracker.setMeta('monthlyOverviewLastSentKey', currentMonthKey);
+        console.log('📅 Posted automatic monthly overview.');
+      }
     } catch (error) {
       console.error('Error sending Discord message:', error.message);
     }
@@ -387,6 +593,7 @@ async function syncNotionToDiscord() {
  */
 async function startBot() {
   try {
+    acquireProcessLock();
     console.log('🤖 Starting Notion-Discord Sync Bot...');
 
     // Login to Discord
@@ -420,7 +627,7 @@ async function startBot() {
       await registerSlashCommands(configuredChannel);
       registeredGuildIds.add(guildId);
     }
-    console.log('⌨️  Manual commands enabled: /dailyreport, /remindercheck');
+    console.log('⌨️  Manual commands enabled: /remindercheck, /calendar, /clear');
     console.log(`⏱️  Polling interval: ${config.polling.intervalSeconds} seconds\n`);
 
     registerCommandHandlers();
@@ -436,10 +643,19 @@ async function startBot() {
       console.log('\n👋 Shutting down gracefully...');
       clearInterval(intervalId);
       await discordClient.destroy();
+      releaseProcessLock();
+      process.exit(0);
+    });
+
+    process.on('SIGTERM', async () => {
+      clearInterval(intervalId);
+      await discordClient.destroy();
+      releaseProcessLock();
       process.exit(0);
     });
   } catch (error) {
     console.error('❌ Failed to start bot:', error.message);
+    releaseProcessLock();
     process.exit(1);
   }
 }

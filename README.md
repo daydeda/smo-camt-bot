@@ -9,9 +9,11 @@ A real-time Discord bot that monitors your Notion Kanban database and posts upda
 ✅ **Rich Embeds** - Beautiful Discord messages with before/after values
 ✅ **Multiple Properties** - Tracks any extracted Notion property changes
 ✅ **Organization Filter** - Tracks only cards in the configured Notion Organization (default: SMO CAMT)
-✅ **Daily Report Command** - Run /dailyreport in Discord to post status summary: Not Started, In-Progress, In-Review, Done, Overdue
 ✅ **Reminder Check Command** - Run /remindercheck in Discord to trigger due-today/overdue reminders immediately
 ✅ **Deadline Reminders** - Sends due-today/overdue reminders and tags department roles
+✅ **Calendar Command** - Run /calendar with range `today`, `week`, or `month` to post rich schedule embeds
+✅ **Clear Command (Admin Only)** - Run /clear to clear all messages in the current configured channel
+✅ **Monthly Overview** - Auto-posts rich monthly overview on day 1 of each month
 ✅ **Error Resilient** - Gracefully handles API errors and reconnects
 
 ## Prerequisites
@@ -121,8 +123,10 @@ Changes are posted as Discord embeds with:
 - Timestamp
 
 Additionally:
-- Run /dailyreport in any configured Discord channel to post the daily summary on demand.
 - Run /remindercheck in any configured Discord channel to test and trigger deadline reminders instantly.
+- Run /calendar range:today|week|month in any configured Discord channel to post rich calendar embeds.
+- Run /clear in a configured channel to clear channel messages (admin only).
+- Monthly overview auto-posts on the first day of each month.
 - Overdue count is computed from deadline dates (Date property) when due date is in the past and task is not Done.
 - Deadline reminder messages are sent for due-today and overdue cards (once per card per day), tagging matching Department roles.
 
