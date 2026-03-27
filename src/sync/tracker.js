@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = path.join(__dirname, '../../state_tracker.json');
+const META_KEY = '__meta';
 
 class StateTracker {
   constructor() {
@@ -19,13 +20,21 @@ class StateTracker {
       if (fs.existsSync(STATE_FILE)) {
         const data = fs.readFileSync(STATE_FILE, 'utf8');
         this.state = JSON.parse(data);
-        console.log(`📋 Loaded tracker state with ${Object.keys(this.state).length} cards`);
+        if (!this.state || typeof this.state !== 'object') {
+          this.state = {};
+        }
+        if (!this.state[META_KEY] || typeof this.state[META_KEY] !== 'object') {
+          this.state[META_KEY] = {};
+        }
+        const trackedCardCount = Object.keys(this.state).filter(key => key !== META_KEY).length;
+        console.log(`📋 Loaded tracker state with ${trackedCardCount} cards`);
       } else {
         console.log('📋 No previous state found, starting fresh');
+        this.state = { [META_KEY]: {} };
       }
     } catch (error) {
       console.error('Error loading state:', error.message);
-      this.state = {};
+      this.state = { [META_KEY]: {} };
     }
   }
 
@@ -44,6 +53,10 @@ class StateTracker {
    * Get the stored state for a card
    */
   getCardState(cardId) {
+    if (cardId === META_KEY) {
+      return null;
+    }
+
     return this.state[cardId] || null;
   }
 
@@ -51,6 +64,10 @@ class StateTracker {
    * Update the state for a card
    */
   updateCardState(cardId, cardData) {
+    if (cardId === META_KEY) {
+      return;
+    }
+
     this.state[cardId] = {
       ...cardData,
       lastUpdated: new Date().toISOString(),
@@ -78,6 +95,10 @@ class StateTracker {
    * Remove a card from state (when deleted)
    */
   removeCardState(cardId) {
+    if (cardId === META_KEY) {
+      return;
+    }
+
     delete this.state[cardId];
     this.saveState();
   }
@@ -87,6 +108,10 @@ class StateTracker {
    */
   removeCardStates(cardIds) {
     for (const cardId of cardIds) {
+      if (cardId === META_KEY) {
+        continue;
+      }
+
       delete this.state[cardId];
     }
 
@@ -97,14 +122,38 @@ class StateTracker {
    * Get all tracked card IDs
    */
   getAllCardIds() {
-    return Object.keys(this.state);
+    return Object.keys(this.state).filter(cardId => cardId !== META_KEY);
+  }
+
+  /**
+   * Get metadata value by key
+   */
+  getMeta(key, defaultValue = null) {
+    const meta = this.state[META_KEY] || {};
+    if (!Object.hasOwn(meta, key)) {
+      return defaultValue;
+    }
+
+    return meta[key];
+  }
+
+  /**
+   * Set metadata value by key
+   */
+  setMeta(key, value) {
+    if (!this.state[META_KEY] || typeof this.state[META_KEY] !== 'object') {
+      this.state[META_KEY] = {};
+    }
+
+    this.state[META_KEY][key] = value;
+    this.saveState();
   }
 
   /**
    * Clear all state
    */
   clearState() {
-    this.state = {};
+    this.state = { [META_KEY]: {} };
     this.saveState();
   }
 }

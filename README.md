@@ -8,6 +8,10 @@ A real-time Discord bot that monitors your Notion Kanban database and posts upda
 ✅ **Smart Change Detection** - Only posts when properties actually change
 ✅ **Rich Embeds** - Beautiful Discord messages with before/after values
 ✅ **Multiple Properties** - Tracks any extracted Notion property changes
+✅ **Organization Filter** - Tracks only cards in the configured Notion Organization (default: SMO CAMT)
+✅ **Daily Report Command** - Run /dailyreport in Discord to post status summary: Not Started, In-Progress, In-Review, Done, Overdue
+✅ **Reminder Check Command** - Run /remindercheck in Discord to trigger due-today/overdue reminders immediately
+✅ **Deadline Reminders** - Sends due-today/overdue reminders and tags department roles
 ✅ **Error Resilient** - Gracefully handles API errors and reconnects
 
 ## Prerequisites
@@ -73,7 +77,10 @@ DISCORD_TOKEN=your_bot_token_here
 NOTION_API_KEY=your_integration_token_here
 NOTION_DATABASE_ID=your_database_id_here
 DISCORD_CHANNEL_ID=your_channel_id_here
+# Optional: comma-separated channel IDs for broadcasting to multiple channels
+# DISCORD_CHANNEL_IDS=123456789012345678,234567890123456789
 POLL_INTERVAL=60
+TRACKED_ORGANIZATION=SMO CAMT
 ```
 
 ### 5. Run the Bot
@@ -92,7 +99,7 @@ You should see:
 ✅ Discord bot logged in as YourBot#1234
 ✅ Bot ready! Connected to Discord
 📌 Watching Notion database: [ID]
-💬 Posting updates to Discord channel: [ID]
+💬 Posting updates to Discord channels: [ID]
 ⏱️  Polling interval: 60 seconds
 ```
 
@@ -113,6 +120,12 @@ Changes are posted as Discord embeds with:
 - All property changes listed
 - Timestamp
 
+Additionally:
+- Run /dailyreport in any configured Discord channel to post the daily summary on demand.
+- Run /remindercheck in any configured Discord channel to test and trigger deadline reminders instantly.
+- Overdue count is computed from deadline dates (Date property) when due date is in the past and task is not Done.
+- Deadline reminder messages are sent for due-today and overdue cards (once per card per day), tagging matching Department roles.
+
 ## Customization
 
 ### Polling Interval
@@ -124,9 +137,25 @@ POLL_INTERVAL=300  # 5 minutes
 POLL_INTERVAL=900  # 15 minutes
 ```
 
+### Organization Scope
+
+The bot tracks only cards whose `Organization` property matches `TRACKED_ORGANIZATION`.
+
+```env
+TRACKED_ORGANIZATION=SMO CAMT
+```
+
 ### Property Names
 
 If your Notion database uses different property names, edit `src/notion/database.js` to map them correctly. The bot automatically detects all properties.
+
+### Department Role Mentions
+
+The `Department` field now automatically mentions matching Discord roles in notifications.
+
+- Matching is name-based and case-insensitive.
+- Example: Notion Department `Marketing` matches Discord role `Marketing`.
+- For multi-select departments, all matched roles are mentioned.
 
 ### Embed Colors
 
@@ -148,8 +177,8 @@ Edit `src/sync/syncer.js` line with `.setColor()` to change notification colors:
 - Ensure integration is connected to database in Notion
 
 **No notifications sent:**
-- Check DISCORD_CHANNEL_ID is correct
-- Verify bot has permission to send messages in channel
+- Check DISCORD_CHANNEL_ID (or DISCORD_CHANNEL_IDS) is correct
+- Verify bot has permission to send messages in every configured channel
 - Check console logs for errors
 
 **Rate limit issues:**

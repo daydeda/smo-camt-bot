@@ -3,6 +3,7 @@ import { EmbedBuilder } from 'discord.js';
 const DATE_ONLY_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 const DATETIME_REGEX = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
 const SUPPORT_FOOTER_TEXT = 'Need help? Contact on IG: dda.day or on Discord.';
+const STATUS_BUCKETS = ['notStarted', 'inProgress', 'inReview', 'done'];
 
 /**
  * Normalizes values so comparisons are deterministic.
@@ -96,14 +97,54 @@ function formatDateTimeText(value) {
   }
 
   if (DATE_ONLY_REGEX.test(value)) {
-    return value;
+    return `${value.slice(8, 10)}-${value.slice(5, 7)}-${value.slice(0, 4)}`;
   }
 
   if (DATETIME_REGEX.test(value)) {
-    return `${value.slice(0, 10)} ${value.slice(11, 16)}`;
+    return `${value.slice(8, 10)}-${value.slice(5, 7)}-${value.slice(0, 4)} ${value.slice(11, 16)}`;
   }
 
   return null;
+}
+
+function toDateOnly(date) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
+function formatDateKey(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function formatDateLabel(date) {
+  const day = String(date.getDate()).padStart(2, '0');
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const year = date.getFullYear();
+  return `${day}-${month}-${year}`;
+}
+
+function parseNotionDate(value) {
+  if (typeof value !== 'string') {
+    return null;
+  }
+
+  if (DATE_ONLY_REGEX.test(value)) {
+    const [year, month, day] = value.split('-').map(part => parseInt(part, 10));
+    return new Date(year, month - 1, day);
+  }
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+
+  return parsed;
+}
+
+function isDateTimeValue(value) {
+  return typeof value === 'string' && DATETIME_REGEX.test(value);
 }
 
 function formatScalarValue(value) {
@@ -143,6 +184,50 @@ function formatFieldValue(value) {
   return formatScalarValue(value);
 }
 
+function normalizeLookupText(value) {
+  if (typeof value !== 'string') {
+    return '';
+  }
+
+  return value.trim().toLowerCase().replace(/[\s_-]+/g, ' ');
+}
+
+function collectDepartmentNames(departmentValue) {
+  if (Array.isArray(departmentValue)) {
+    return departmentValue
+      .map(item => String(item).trim())
+      .filter(Boolean);
+  }
+
+  if (typeof departmentValue === 'string') {
+    return departmentValue
+      .split(',')
+      .map(item => item.trim())
+      .filter(Boolean);
+  }
+
+  return [];
+}
+
+function formatDepartmentWithRoleMention(departmentValue, departmentRoleMentions = {}) {
+  const departmentNames = collectDepartmentNames(departmentValue);
+
+  const mentionSet = new Set();
+  for (const departmentName of departmentNames) {
+    const normalizedKey = normalizeLookupText(departmentName);
+    const mention = departmentRoleMentions[normalizedKey];
+    if (mention) {
+      mentionSet.add(mention);
+    }
+  }
+
+  if (mentionSet.size === 0) {
+    return 'None';
+  }
+
+  return Array.from(mentionSet).join(' ');
+}
+
 function truncateFieldValue(value, maxLength = 1024) {
   if (value.length <= maxLength) {
     return value;
@@ -164,8 +249,11 @@ function formatMeetingMinutesField(value) {
   return titleLines.join('\n');
 }
 
-function addCommonFields(embed, cardData) {
-  const departmentText = formatFieldValue(cardData?.properties?.Department);
+function addCommonFields(embed, cardData, departmentRoleMentions = {}) {
+  const departmentText = formatDepartmentWithRoleMention(
+    cardData?.properties?.Department,
+    departmentRoleMentions
+  );
   const dateText = formatFieldValue(cardData?.properties?.Date);
   const meetingMinutesText = formatMeetingMinutesField(
     cardData?.properties?.['รายงานการประชุม (Meeting Minutes)']
@@ -206,6 +294,211 @@ function normalizeStatusText(value) {
   return value.trim().toLowerCase().replace(/[\s_-]+/g, ' ');
 }
 
+function getStatusValue(properties = {}) {
+  const exactStatus = properties.Status;
+  if (typeof exactStatus === 'string') {
+    return exactStatus;
+  }
+
+  const statusKey = Object.keys(properties).find(key => key.toLowerCase().includes('status'));
+  if (statusKey && typeof properties[statusKey] === 'string') {
+    return properties[statusKey];
+  }
+
+  return null;
+}
+
+function mapStatusBucket(statusText) {
+  const normalized = normalizeStatusText(statusText);
+
+  if (
+    normalized === 'not started' ||
+    normalized === 'todo' ||
+    normalized === 'to do' ||
+    normalized === 'backlog'
+  ) {
+    return 'notStarted';
+  }
+
+  if (normalized === 'in progress' || normalized === 'doing' || normalized === 'progress') {
+    return 'inProgress';
+  }
+
+  if (normalized === 'in review' || normalized === 'review') {
+    return 'inReview';
+  }
+
+  if (
+    normalized === 'done' ||
+    normalized === 'complete' ||
+    normalized === 'completed'
+  ) {
+    return 'done';
+  }
+
+  return null;
+}
+
+function getDeadlineValue(properties = {}) {
+  if (typeof properties.Date === 'string') {
+    return properties.Date;
+  }
+
+  const deadlineKey = Object.keys(properties).find(key => {
+    const normalized = key.toLowerCase();
+    return normalized.includes('deadline') || normalized.includes('due') || normalized === 'date';
+  });
+
+  if (!deadlineKey) {
+    return null;
+  }
+
+  return typeof properties[deadlineKey] === 'string' ? properties[deadlineKey] : null;
+}
+
+function isOverdue(deadlineRaw, deadlineDate, statusBucket, now, nowDateOnly) {
+  if (!deadlineDate) {
+    return false;
+  }
+
+  if (statusBucket === 'done') {
+    return false;
+  }
+
+  if (isDateTimeValue(deadlineRaw)) {
+    return deadlineDate.getTime() < now.getTime();
+  }
+
+  return toDateOnly(deadlineDate).getTime() < nowDateOnly.getTime();
+}
+
+function isDueInOneDay(deadlineRaw, deadlineDate, statusBucket, now, nowDateOnly) {
+  if (!deadlineDate || statusBucket === 'done') {
+    return false;
+  }
+
+  if (isDateTimeValue(deadlineRaw)) {
+    const diffMs = deadlineDate.getTime() - now.getTime();
+    return diffMs > 0 && diffMs <= 24 * 60 * 60 * 1000;
+  }
+
+  const reminderDate = new Date(deadlineDate.getFullYear(), deadlineDate.getMonth(), deadlineDate.getDate() - 1);
+  return reminderDate.getTime() === nowDateOnly.getTime();
+}
+
+export function buildDailyReportSummary(cards, now = new Date()) {
+  const counts = {
+    notStarted: 0,
+    inProgress: 0,
+    inReview: 0,
+    done: 0,
+    overdue: 0,
+  };
+
+  const nowDateOnly = toDateOnly(now);
+
+  for (const card of cards) {
+    const properties = card?.properties || {};
+    const statusValue = getStatusValue(properties);
+    const statusBucket = mapStatusBucket(statusValue);
+    const deadlineRaw = getDeadlineValue(properties);
+    const deadlineDate = parseNotionDate(deadlineRaw);
+
+    if (STATUS_BUCKETS.includes(statusBucket)) {
+      counts[statusBucket] += 1;
+    }
+
+    if (isOverdue(deadlineRaw, deadlineDate, statusBucket, now, nowDateOnly)) {
+      counts.overdue += 1;
+    }
+  }
+
+  return {
+    counts,
+    generatedAt: now,
+    totalCards: cards.length,
+  };
+}
+
+export function createDailyReportEmbed(cards, now = new Date()) {
+  const report = buildDailyReportSummary(cards, now);
+  const reportDate = formatDateLabel(now);
+
+  const embed = new EmbedBuilder()
+    .setTitle(`📊 Daily Report (${reportDate})`)
+    .setColor(0x1F8B4C)
+    .setDescription('Summary of current task statuses from Notion')
+    .addFields(
+      { name: 'Not Started', value: String(report.counts.notStarted), inline: true },
+      { name: 'In-Progress', value: String(report.counts.inProgress), inline: true },
+      { name: 'In-Review', value: String(report.counts.inReview), inline: true },
+      { name: 'Done', value: String(report.counts.done), inline: true },
+      { name: 'Overdue', value: String(report.counts.overdue), inline: true },
+      { name: 'Total Cards', value: String(report.totalCards), inline: true }
+    )
+    .setTimestamp(now);
+
+  addSupportFooter(embed);
+  return embed;
+}
+
+export function createDeadlineReminderEmbeds(
+  cards,
+  departmentRoleMentions = {},
+  reminderStateByCardId = {},
+  now = new Date(),
+  options = {}
+) {
+  const { ignoreDailyLimit = false } = options;
+  const embeds = [];
+  const updatedReminderStateByCardId = { ...reminderStateByCardId };
+  const todayKey = formatDateKey(now);
+  const nowDateOnly = toDateOnly(now);
+
+  for (const card of cards) {
+    const properties = card?.properties || {};
+    const statusValue = getStatusValue(properties);
+    const statusBucket = mapStatusBucket(statusValue);
+    const deadlineRaw = getDeadlineValue(properties);
+    const deadlineDate = parseNotionDate(deadlineRaw);
+
+    const overdue = isOverdue(deadlineRaw, deadlineDate, statusBucket, now, nowDateOnly);
+    const dueInOneDay = isDueInOneDay(deadlineRaw, deadlineDate, statusBucket, now, nowDateOnly);
+    if (!overdue && !dueInOneDay) {
+      continue;
+    }
+
+    const lastReminderDate = updatedReminderStateByCardId[card.id];
+    if (!ignoreDailyLimit && lastReminderDate === todayKey) {
+      continue;
+    }
+
+    const cardName = getCardName(card);
+    const dueLabel = deadlineRaw ? formatFieldValue(deadlineRaw) : 'None';
+    const description = overdue
+      ? `This card is overdue. Deadline: **${dueLabel}**`
+      : `This card is due in 1 day. Deadline: **${dueLabel}**`;
+
+    const embed = new EmbedBuilder()
+      .setTitle(`⏰ Deadline Reminder: ${cardName}`)
+      .setURL(card.url)
+      .setColor(overdue ? 0xE74C3C : 0xF39C12)
+      .setDescription(description)
+      .setTimestamp(now);
+
+    addCommonFields(embed, card, departmentRoleMentions);
+    addSupportFooter(embed);
+
+    embeds.push(embed);
+    updatedReminderStateByCardId[card.id] = todayKey;
+  }
+
+  return {
+    embeds,
+    reminderStateByCardId: updatedReminderStateByCardId,
+  };
+}
+
 function getColorByStatus(changes) {
   const statusEntry = Object.entries(changes).find(([key]) => key.toLowerCase().includes('status'));
   if (!statusEntry) {
@@ -237,7 +530,7 @@ function getColorByStatus(changes) {
 /**
  * Creates a Discord embed for property changes.
  */
-function createChangeEmbed(cardName, cardUrl, changes, cardData) {
+function createChangeEmbed(cardName, cardUrl, changes, cardData, departmentRoleMentions = {}) {
   const changedEntries = Object.entries(changes);
   const color = getColorByStatus(changes);
 
@@ -258,13 +551,13 @@ function createChangeEmbed(cardName, cardUrl, changes, cardData) {
   }
 
   embed.setDescription(summaryLines.join('\n'));
-  addCommonFields(embed, cardData);
+  addCommonFields(embed, cardData, departmentRoleMentions);
   addSupportFooter(embed);
 
   return embed;
 }
 
-function createCreatedEmbed(cardName, cardUrl, cardData) {
+function createCreatedEmbed(cardName, cardUrl, cardData, departmentRoleMentions = {}) {
   const embed = new EmbedBuilder()
     .setTitle(`🆕 ${cardName || 'Task Created'}`)
     .setURL(cardUrl)
@@ -272,13 +565,13 @@ function createCreatedEmbed(cardName, cardUrl, cardData) {
     .setDescription('New card created in Notion database')
     .setTimestamp();
 
-  addCommonFields(embed, cardData);
+  addCommonFields(embed, cardData, departmentRoleMentions);
   addSupportFooter(embed);
 
   return embed;
 }
 
-function createRemovedEmbed(cardName, cardUrl, cardData) {
+function createRemovedEmbed(cardName, cardUrl, cardData, departmentRoleMentions = {}) {
   const embed = new EmbedBuilder()
     .setTitle(`🗑️ ${cardName || 'Task Removed'}`)
     .setURL(cardUrl)
@@ -286,7 +579,7 @@ function createRemovedEmbed(cardName, cardUrl, cardData) {
     .setDescription('Card removed from Notion database')
     .setTimestamp();
 
-  addCommonFields(embed, cardData);
+  addCommonFields(embed, cardData, departmentRoleMentions);
   addSupportFooter(embed);
 
   return embed;
@@ -354,31 +647,31 @@ export function findChangedCards(oldState, newCards) {
 /**
  * Creates Discord embeds for all changed cards.
  */
-export function createChangeEmbeds(changedCards) {
+export function createChangeEmbeds(changedCards, departmentRoleMentions = {}) {
   return changedCards.map(card => {
     const cardName = getCardName(card);
 
-    return createChangeEmbed(cardName, card.url, card.changes, card);
+    return createChangeEmbed(cardName, card.url, card.changes, card, departmentRoleMentions);
   });
 }
 
 /**
  * Creates Discord embeds for created cards.
  */
-export function createCreatedEmbeds(createdCards) {
+export function createCreatedEmbeds(createdCards, departmentRoleMentions = {}) {
   return createdCards.map(card => {
     const cardName = getCardName(card);
-    return createCreatedEmbed(cardName, card.url, card);
+    return createCreatedEmbed(cardName, card.url, card, departmentRoleMentions);
   });
 }
 
 /**
  * Creates Discord embeds for removed cards.
  */
-export function createRemovedEmbeds(deletedCards) {
+export function createRemovedEmbeds(deletedCards, departmentRoleMentions = {}) {
   return deletedCards.map(card => {
     const cardName = getCardName(card);
-    return createRemovedEmbed(cardName, card.url, card);
+    return createRemovedEmbed(cardName, card.url, card, departmentRoleMentions);
   });
 }
 
@@ -388,4 +681,7 @@ export default {
   createChangeEmbeds,
   createCreatedEmbeds,
   createRemovedEmbeds,
+  createDailyReportEmbed,
+  createDeadlineReminderEmbeds,
+  buildDailyReportSummary,
 };
