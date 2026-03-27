@@ -1,0 +1,94 @@
+name: Run Notion-Discord SMO-CAMT Bot
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Re-run every 6 hours. Each run keeps the bot alive for ~5h50m.
+    - cron: "0 */6 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: notion-discord-bot
+  cancel-in-progress: false
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Restore bot state cache
+        id: restore-state
+        uses: actions/cache/restore@v4
+        with:
+          path: state_tracker.json
+          key: bot-state-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            bot-state-${{ github.ref_name }}-
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate required secrets
+        env:
+          DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
+          DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
+          DISCORD_CHANNEL_IDS: ${{ secrets.DISCORD_CHANNEL_IDS }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+        run: |
+          if [ -z "$DISCORD_TOKEN" ]; then
+            echo "Missing required secret: DISCORD_TOKEN"
+            exit 1
+          fi
+
+          if [ -z "$NOTION_API_KEY" ]; then
+            echo "Missing required secret: NOTION_API_KEY"
+            exit 1
+          fi
+
+          if [ -z "$NOTION_DATABASE_ID" ]; then
+            echo "Missing required secret: NOTION_DATABASE_ID"
+            exit 1
+          fi
+
+          if [ -z "$DISCORD_CHANNEL_ID" ] && [ -z "$DISCORD_CHANNEL_IDS" ]; then
+            echo "Missing channel secret: set DISCORD_CHANNEL_ID or DISCORD_CHANNEL_IDS"
+            exit 1
+          fi
+
+      - name: Run bot (5h50m window)
+        env:
+          DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
+          DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
+          DISCORD_CHANNEL_IDS: ${{ secrets.DISCORD_CHANNEL_IDS }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          TRACKED_ORGANIZATION: ${{ secrets.TRACKED_ORGANIZATION }}
+          POLL_INTERVAL: ${{ secrets.POLL_INTERVAL }}
+        run: |
+          set +e
+          timeout --signal=SIGTERM 5h50m npm start
+          EXIT_CODE=$?
+
+          # timeout exits with 124; treat it as expected so next schedule can continue.
+          if [ "$EXIT_CODE" -ne 0 ] && [ "$EXIT_CODE" -ne 124 ]; then
+            exit "$EXIT_CODE"
+          fi
+
+      - name: Save bot state cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state_tracker.json
+          key: bot-state-${{ github.ref_name }}-${{ github.run_id }}
