@@ -1,0 +1,19 @@
+{
+  "name": "notion-discord-bot",
+  "version": "1.0.0",
+  "description": "Discord bot that syncs Notion Kanban database status changes",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "keywords": ["discord", "notion", "bot", "kanban"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "discord.js": "^14.14.1",
+    "@notionhq/client": "^2.2.13",
+    "dotenv": "^16.3.1"
+  }
+}
