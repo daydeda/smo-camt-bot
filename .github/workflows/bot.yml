@@ -100,14 +100,16 @@ jobs:
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
           TRACKED_ORGANIZATION: ${{ secrets.TRACKED_ORGANIZATION }}
           POLL_INTERVAL: ${{ secrets.POLL_INTERVAL }}
+        shell: bash
         run: |
           if [ ! -f state_tracker.json ]; then
             echo '{}' > state_tracker.json
           fi
 
           set +e
+          set -o pipefail
           timeout --signal=SIGTERM 5h50m npm start 2>&1 | tee bot.log
-          EXIT_CODE=$?
+          EXIT_CODE=${PIPESTATUS[0]}
 
           # timeout exits with 124; treat it as expected so next schedule can continue.
           if [ "$EXIT_CODE" -ne 0 ] && [ "$EXIT_CODE" -ne 124 ]; then
