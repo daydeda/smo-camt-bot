@@ -92,7 +92,7 @@ jobs:
             fi
           fi
 
-      - name: Run bot (5h50m window)
+      - name: Run bot (350m window)
         id: bot_process
         env:
           DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
@@ -110,7 +110,7 @@ jobs:
 
           set +e
           set -o pipefail
-          timeout --signal=SIGTERM 5h50m npm start 2>&1 | tee bot.log
+          timeout --signal=SIGTERM 350m npm start 2>&1 | tee bot.log
           EXIT_CODE=${PIPESTATUS[0]}
           echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
 
