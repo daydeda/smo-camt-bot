@@ -134,6 +134,14 @@ jobs:
               ref: context.ref.replace('refs/heads/', ''),
             });
 
+      - name: Upload bot log artifact
+        if: ${{ always() && hashFiles('bot.log') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: bot-log-${{ github.run_id }}
+          path: bot.log
+          if-no-files-found: ignore
+
       - name: Save bot state cache
         if: ${{ always() && hashFiles('state_tracker.json') != '' }}
         uses: actions/cache/save@v4

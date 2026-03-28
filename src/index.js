@@ -614,7 +614,7 @@ async function startBot() {
     console.log(`💬 Posting updates to Discord channels: ${config.discord.channelIds.join(', ')}`);
     const configuredChannels = await fetchConfiguredChannels();
     if (configuredChannels.length === 0) {
-      throw new Error('No configured text channels are available.');
+      console.warn('⚠️  No configured text channels are currently reachable. Bot will stay online and retry during sync.');
     }
 
     const registeredGuildIds = new Set();
