@@ -5,6 +5,9 @@ import {
   createDeadlineReminderEmbeds,
   createCalendarOverviewEmbeds,
   createCalendarOverviewEmbed,
+  hasRequiredTaskDetails,
+  getCompletedCards,
+  createCompletedEmbeds,
 } from './syncer.js';
 
 function makeCard(id, status, date, department = 'Ops') {
@@ -126,6 +129,38 @@ test('createDeadlineReminderEmbeds handles datetime deadlines for one-day and ov
   assert.match(overdueResult.embeds[0].data.description, /overdue/i);
 });
 
+test('createDeadlineReminderEmbeds does not remind when task is done variant', () => {
+  const now = new Date(2026, 2, 28, 10, 0, 0);
+  const cards = [
+    makeCard('done-1', 'Done ✅', '2026-03-27', 'Operations'),
+    makeCard('done-2', 'Completed - Approved', '2026-03-27', 'Operations'),
+  ];
+
+  const departmentRoleMentions = {
+    operations: '<@&1234567890>',
+  };
+
+  const result = createDeadlineReminderEmbeds(cards, departmentRoleMentions, {}, now);
+  assert.equal(result.embeds.length, 0);
+});
+
+test('createDeadlineReminderEmbeds shows end date when Date is a range', () => {
+  const now = new Date(2026, 2, 28, 10, 0, 0);
+  const cards = [
+    makeCard('range-1', 'In Progress', '2026-03-29 → 2026-03-30', 'Operations'),
+  ];
+
+  const departmentRoleMentions = {
+    operations: '<@&1234567890>',
+  };
+
+  const result = createDeadlineReminderEmbeds(cards, departmentRoleMentions, {}, now);
+  assert.equal(result.embeds.length, 1);
+
+  const dateField = result.embeds[0].data.fields.find(field => field.name === '📅 Date');
+  assert.equal(dateField.value, '29-03-2026 → 30-03-2026');
+});
+
 test('createCalendarOverviewEmbed returns week tasks with DD-MM-YYYY dates', () => {
   const now = new Date(2026, 2, 28, 10, 0, 0);
   const cards = [
@@ -160,4 +195,72 @@ test('createCalendarOverviewEmbed month range includes month title', () => {
 
   const embed = createCalendarOverviewEmbed(cards, 'month', now, { title: '📅 Monthly Overview' });
   assert.match(embed.data.title, /Monthly Overview/);
+});
+
+test('hasRequiredTaskDetails requires activity, date, and department', () => {
+  const missingDate = {
+    ...makeCard('incomplete', 'Not Started', '2026-03-24', 'Operations'),
+    properties: {
+      ...makeCard('incomplete', 'Not Started', '2026-03-24', 'Operations').properties,
+      Date: '',
+    },
+  };
+
+  const missingDepartment = {
+    ...makeCard('missing-dept', 'Not Started', '2026-03-24', 'Operations'),
+    properties: {
+      ...makeCard('missing-dept', 'Not Started', '2026-03-24', 'Operations').properties,
+      Department: [],
+    },
+  };
+
+  const minutesOptional = {
+    ...makeCard('complete', 'Not Started', '2026-03-24', 'Operations'),
+    properties: {
+      ...makeCard('complete', 'Not Started', '2026-03-24', 'Operations').properties,
+      'รายงานการประชุม (Meeting Minutes)': [],
+    },
+  };
+
+  assert.equal(hasRequiredTaskDetails(missingDate), false);
+  assert.equal(hasRequiredTaskDetails(missingDepartment), false);
+  assert.equal(hasRequiredTaskDetails(minutesOptional), true);
+});
+
+test('getCompletedCards returns only status transitions to done', () => {
+  const changedCards = [
+    {
+      ...makeCard('1', 'Done', '2026-03-24', 'Operations'),
+      changes: {
+        Status: {
+          old: 'In Progress',
+          new: 'Done',
+        },
+      },
+    },
+    {
+      ...makeCard('2', 'In Review', '2026-03-24', 'Operations'),
+      changes: {
+        Department: {
+          old: 'Ops',
+          new: 'Operations',
+        },
+      },
+    },
+  ];
+
+  const completedCards = getCompletedCards(changedCards);
+  assert.equal(completedCards.length, 1);
+  assert.equal(completedCards[0].id, '1');
+});
+
+test('createCompletedEmbeds creates finished-task embed', () => {
+  const cards = [
+    makeCard('1', 'Done', '2026-03-24', 'Operations'),
+  ];
+
+  const embeds = createCompletedEmbeds(cards, { operations: '<@&1234567890>' });
+  assert.equal(embeds.length, 1);
+  assert.match(embeds[0].data.title, /Task 1/i);
+  assert.match(embeds[0].data.description, /status changed to done/i);
 });

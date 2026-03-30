@@ -9,6 +9,18 @@ function extractRichText(richTextArray) {
   return richTextArray.map(rt => rt.plain_text).join('');
 }
 
+function extractNotionDateValue(dateValue) {
+  if (!dateValue?.start) {
+    return null;
+  }
+
+  if (dateValue.end) {
+    return `${dateValue.start} → ${dateValue.end}`;
+  }
+
+  return dateValue.start;
+}
+
 function extractPageTitleFromProperties(properties) {
   if (!properties || typeof properties !== 'object') {
     return null;
@@ -70,7 +82,7 @@ function extractFormulaValue(formula) {
     case 'boolean':
       return formula.boolean;
     case 'date':
-      return formula.date?.start || null;
+      return extractNotionDateValue(formula.date);
     default:
       return null;
   }
@@ -96,7 +108,7 @@ async function extractPropertyValue(property, titleCache) {
     case 'people':
       return property.people?.map(p => p.name) || [];
     case 'date':
-      return property.date?.start || null;
+      return extractNotionDateValue(property.date);
     case 'formula':
       return extractFormulaValue(property.formula);
     case 'relation':

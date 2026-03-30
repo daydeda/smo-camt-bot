@@ -6,6 +6,7 @@ const SUPPORT_FOOTER_TEXT = 'Need help? Contact on IG: dda.day or on Discord.';
 const STATUS_BUCKETS = ['notStarted', 'inProgress', 'inReview', 'done'];
 const CALENDAR_MAX_LINES = 20;
 const CALENDAR_DESCRIPTION_MAX_LENGTH = 3500;
+const REQUIRED_CREATE_FIELDS = ['กิจกรรม', 'Department', 'Date'];
 
 /**
  * Normalizes values so comparisons are deterministic.
@@ -98,15 +99,41 @@ function formatDateTimeText(value) {
     return null;
   }
 
-  if (DATE_ONLY_REGEX.test(value)) {
-    return `${value.slice(8, 10)}-${value.slice(5, 7)}-${value.slice(0, 4)}`;
+  const normalizedValue = value.trim();
+
+  if (DATE_ONLY_REGEX.test(normalizedValue)) {
+    return `${normalizedValue.slice(8, 10)}-${normalizedValue.slice(5, 7)}-${normalizedValue.slice(0, 4)}`;
   }
 
-  if (DATETIME_REGEX.test(value)) {
-    return `${value.slice(8, 10)}-${value.slice(5, 7)}-${value.slice(0, 4)} ${value.slice(11, 16)}`;
+  if (DATETIME_REGEX.test(normalizedValue)) {
+    return `${normalizedValue.slice(8, 10)}-${normalizedValue.slice(5, 7)}-${normalizedValue.slice(0, 4)} ${normalizedValue.slice(11, 16)}`;
   }
 
   return null;
+}
+
+function splitDateRangeValue(value) {
+  if (typeof value !== 'string') {
+    return { start: null, end: null };
+  }
+
+  const [startPart, endPart] = value.split('→').map(part => part?.trim());
+
+  return {
+    start: startPart || null,
+    end: endPart || null,
+  };
+}
+
+function formatDateRangeText(value) {
+  const { start, end } = splitDateRangeValue(value);
+  if (!start || !end) {
+    return null;
+  }
+
+  const startText = formatDateTimeText(start) || start;
+  const endText = formatDateTimeText(end) || end;
+  return `${startText} → ${endText}`;
 }
 
 function toDateOnly(date) {
@@ -128,16 +155,17 @@ function formatDateLabel(date) {
 }
 
 function parseNotionDate(value) {
-  if (typeof value !== 'string') {
+  const { start } = splitDateRangeValue(value);
+  if (typeof start !== 'string') {
     return null;
   }
 
-  if (DATE_ONLY_REGEX.test(value)) {
-    const [year, month, day] = value.split('-').map(part => parseInt(part, 10));
+  if (DATE_ONLY_REGEX.test(start)) {
+    const [year, month, day] = start.split('-').map(part => parseInt(part, 10));
     return new Date(year, month - 1, day);
   }
 
-  const parsed = new Date(value);
+  const parsed = new Date(start);
   if (Number.isNaN(parsed.getTime())) {
     return null;
   }
@@ -146,12 +174,18 @@ function parseNotionDate(value) {
 }
 
 function isDateTimeValue(value) {
-  return typeof value === 'string' && DATETIME_REGEX.test(value);
+  const { start } = splitDateRangeValue(value);
+  return typeof start === 'string' && DATETIME_REGEX.test(start);
 }
 
 function formatScalarValue(value) {
   if (value === null || value === undefined || value === '') {
     return 'None';
+  }
+
+  const formattedDateRange = formatDateRangeText(value);
+  if (formattedDateRange) {
+    return formattedDateRange;
   }
 
   const formattedDate = formatDateTimeText(value);
@@ -312,28 +346,29 @@ function getStatusValue(properties = {}) {
 
 function mapStatusBucket(statusText) {
   const normalized = normalizeStatusText(statusText);
+  const hasWord = (word) => new RegExp(`(^|\\s)${word}(\\s|$)`).test(normalized);
 
   if (
-    normalized === 'not started' ||
-    normalized === 'todo' ||
-    normalized === 'to do' ||
-    normalized === 'backlog'
+    hasWord('not started') ||
+    hasWord('todo') ||
+    hasWord('to do') ||
+    hasWord('backlog')
   ) {
     return 'notStarted';
   }
 
-  if (normalized === 'in progress' || normalized === 'doing' || normalized === 'progress') {
+  if (hasWord('in progress') || hasWord('doing') || hasWord('progress')) {
     return 'inProgress';
   }
 
-  if (normalized === 'in review' || normalized === 'review') {
+  if (hasWord('in review') || hasWord('review')) {
     return 'inReview';
   }
 
   if (
-    normalized === 'done' ||
-    normalized === 'complete' ||
-    normalized === 'completed'
+    hasWord('done') ||
+    hasWord('complete') ||
+    hasWord('completed')
   ) {
     return 'done';
   }
@@ -802,6 +837,65 @@ function createCreatedEmbed(cardName, cardUrl, cardData, departmentRoleMentions 
   return embed;
 }
 
+function isFilledDetailValue(value) {
+  if (value === null || value === undefined) {
+    return false;
+  }
+
+  if (Array.isArray(value)) {
+    return value.length > 0;
+  }
+
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    return normalized.length > 0 && normalized !== 'none';
+  }
+
+  return true;
+}
+
+export function hasRequiredTaskDetails(card, requiredFields = REQUIRED_CREATE_FIELDS) {
+  const properties = card?.properties || {};
+  return requiredFields.every(fieldName => isFilledDetailValue(properties[fieldName]));
+}
+
+export function getMissingRequiredTaskDetails(card, requiredFields = REQUIRED_CREATE_FIELDS) {
+  const properties = card?.properties || {};
+  return requiredFields.filter(fieldName => !isFilledDetailValue(properties[fieldName]));
+}
+
+function hasStatusChangedToDone(changes = {}) {
+  for (const [propertyName, change] of Object.entries(changes)) {
+    if (!propertyName.toLowerCase().includes('status')) {
+      continue;
+    }
+
+    const nextStatus = mapStatusBucket(change?.new);
+    const prevStatus = mapStatusBucket(change?.old);
+    return nextStatus === 'done' && prevStatus !== 'done';
+  }
+
+  return false;
+}
+
+export function getCompletedCards(changedCards = []) {
+  return changedCards.filter(card => hasStatusChangedToDone(card?.changes || {}));
+}
+
+function createCompletedEmbed(cardName, cardUrl, cardData, departmentRoleMentions = {}) {
+  const embed = new EmbedBuilder()
+    .setTitle(`✅ ${cardName || 'Task Finished'}`)
+    .setURL(cardUrl)
+    .setColor(0x2ECC71)
+    .setDescription('Task status changed to Done')
+    .setTimestamp();
+
+  addCommonFields(embed, cardData, departmentRoleMentions);
+  addSupportFooter(embed);
+
+  return embed;
+}
+
 function createRemovedEmbed(cardName, cardUrl, cardData, departmentRoleMentions = {}) {
   const embed = new EmbedBuilder()
     .setTitle(`🗑️ ${cardName || 'Task Removed'}`)
@@ -896,6 +990,13 @@ export function createCreatedEmbeds(createdCards, departmentRoleMentions = {}) {
   });
 }
 
+export function createCompletedEmbeds(completedCards, departmentRoleMentions = {}) {
+  return completedCards.map(card => {
+    const cardName = getCardName(card);
+    return createCompletedEmbed(cardName, card.url, card, departmentRoleMentions);
+  });
+}
+
 /**
  * Creates Discord embeds for removed cards.
  */
@@ -911,7 +1012,11 @@ export default {
   findChangedCards,
   createChangeEmbeds,
   createCreatedEmbeds,
+  createCompletedEmbeds,
   createRemovedEmbeds,
+  getCompletedCards,
+  hasRequiredTaskDetails,
+  getMissingRequiredTaskDetails,
   createDailyReportEmbed,
   createDeadlineReminderEmbeds,
   buildDailyReportSummary,

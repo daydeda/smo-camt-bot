@@ -11,6 +11,8 @@ import {
   createRemovedEmbeds,
   createDeadlineReminderEmbeds,
   createCalendarOverviewEmbeds,
+  hasRequiredTaskDetails,
+  getMissingRequiredTaskDetails,
 } from './sync/syncer.js';
 import config from './config.js';
 
@@ -471,6 +473,8 @@ async function syncNotionToDiscord() {
   isRunning = true;
 
   try {
+    const wasInitialSync = stateTracker.getAllCardIds().length === 0;
+
     // Fetch current database state
     const cards = await fetchDatabaseCards();
     console.log(`📊 Fetched ${cards.length} cards from Notion database`);
@@ -490,14 +494,64 @@ async function syncNotionToDiscord() {
       deletedCardIds,
       skippedNewCards,
     } = findChangedCards(stateTracker, trackedCards);
+    const creationNotifiedByCardId = {
+      ...stateTracker.getMeta('creationNotifiedByCardId', {}),
+    };
+
+    let creationMetaChanged = false;
+    for (const deletedId of deletedCardIds) {
+      if (Object.hasOwn(creationNotifiedByCardId, deletedId)) {
+        delete creationNotifiedByCardId[deletedId];
+        creationMetaChanged = true;
+      }
+    }
+
+    if (wasInitialSync && Object.keys(creationNotifiedByCardId).length === 0) {
+      // Treat existing cards as baseline to avoid flooding create notifications on first run.
+      for (const card of trackedCards) {
+        creationNotifiedByCardId[card.id] = true;
+      }
+      creationMetaChanged = true;
+    }
+
+    const readyCreatedCards = trackedCards.filter(card => {
+      if (creationNotifiedByCardId[card.id]) {
+        return false;
+      }
+
+      return hasRequiredTaskDetails(card);
+    });
+    const blockedCreatedCards = trackedCards.filter(card => {
+      if (creationNotifiedByCardId[card.id]) {
+        return false;
+      }
+
+      return !hasRequiredTaskDetails(card);
+    });
+
+    // Detail updates should always notify for tracked existing cards, regardless of create-notice state.
+    const notifiableChangedCards = changedCards;
 
     const trackedDeletedCards = deletedCards.filter(card => cardMatchesTrackedOrganization(card));
     const trackedDeletedCardIdSet = new Set(trackedDeletedCards.map(card => card.id));
     const trackedDeletedCardIds = deletedCardIds.filter(cardId => trackedDeletedCardIdSet.has(cardId));
 
     console.log(
-      `📈 Sync summary: created=${createdCards.length}, changed=${changedCards.length}, deleted=${trackedDeletedCardIds.length}, skippedNew=${skippedNewCards}`
+      `📈 Sync summary: created=${createdCards.length}, readyForCreateNotice=${readyCreatedCards.length}, blockedForCreateNotice=${blockedCreatedCards.length}, changed=${changedCards.length}, changedNotified=${notifiableChangedCards.length}, deleted=${trackedDeletedCardIds.length}, skippedNew=${skippedNewCards}`
     );
+
+    if (blockedCreatedCards.length > 0) {
+      const previewCards = blockedCreatedCards.slice(0, 5);
+      for (const card of previewCards) {
+        const missingFields = getMissingRequiredTaskDetails(card);
+        const cardName = card?.properties?.['กิจกรรม'] || card.id;
+        console.log(`⛔ Create notice blocked for "${cardName}": missing [${missingFields.join(', ')}]`);
+      }
+
+      if (blockedCreatedCards.length > previewCards.length) {
+        console.log(`⛔ ...and ${blockedCreatedCards.length - previewCards.length} more blocked card(s)`);
+      }
+    }
 
     // Handle deleted cards
     for (const deletedId of trackedDeletedCardIds) {
@@ -511,10 +565,13 @@ async function syncNotionToDiscord() {
     const now = new Date();
     const reminderStateByCardId = stateTracker.getMeta('deadlineReminderByCardId', {});
 
-    // Post updates and reminders when applicable.
-    if (createdCards.length > 0 || changedCards.length > 0 || trackedDeletedCards.length > 0) {
+    if (
+      readyCreatedCards.length > 0 ||
+      notifiableChangedCards.length > 0 ||
+      trackedDeletedCards.length > 0
+    ) {
       console.log(
-        `✏️  Found updates: created=${createdCards.length}, changed=${changedCards.length}, removed=${trackedDeletedCards.length}`
+        `✏️  Found updates: created=${readyCreatedCards.length}, changed=${notifiableChangedCards.length}, removed=${trackedDeletedCards.length}`
       );
     }
 
@@ -534,8 +591,8 @@ async function syncNotionToDiscord() {
       );
       const hasAnyEmbeds =
         primaryReminderResult.embeds.length > 0 ||
-        createdCards.length > 0 ||
-        changedCards.length > 0 ||
+        readyCreatedCards.length > 0 ||
+        notifiableChangedCards.length > 0 ||
         trackedDeletedCards.length > 0;
 
       if (!hasAnyEmbeds) {
@@ -543,15 +600,15 @@ async function syncNotionToDiscord() {
       } else {
         for (const channel of channels) {
           const departmentRoleMentions = buildDepartmentRoleMentions(channel);
-          const createdEmbeds = createCreatedEmbeds(createdCards, departmentRoleMentions);
-          const changedEmbeds = createChangeEmbeds(changedCards, departmentRoleMentions);
-          const removedEmbeds = createRemovedEmbeds(trackedDeletedCards, departmentRoleMentions);
           const reminderResult = createDeadlineReminderEmbeds(
             trackedCards,
             departmentRoleMentions,
             reminderStateByCardId,
             now
           );
+          const createdEmbeds = createCreatedEmbeds(readyCreatedCards, departmentRoleMentions);
+          const changedEmbeds = createChangeEmbeds(notifiableChangedCards, departmentRoleMentions);
+          const removedEmbeds = createRemovedEmbeds(trackedDeletedCards, departmentRoleMentions);
           const embeds = [...reminderResult.embeds, ...createdEmbeds, ...changedEmbeds, ...removedEmbeds];
 
           if (embeds.length === 0) {
@@ -560,6 +617,11 @@ async function syncNotionToDiscord() {
 
           await sendEmbedsToChannel(channel, embeds);
         }
+
+        for (const card of readyCreatedCards) {
+          creationNotifiedByCardId[card.id] = true;
+        }
+        creationMetaChanged = true;
 
         console.log(
           `✅ Posted updates to ${channels.length} channel(s) (reminders=${primaryReminderResult.embeds.length})`
@@ -577,6 +639,10 @@ async function syncNotionToDiscord() {
       }
     } catch (error) {
       console.error('Error sending Discord message:', error.message);
+    }
+
+    if (creationMetaChanged) {
+      stateTracker.setMeta('creationNotifiedByCardId', creationNotifiedByCardId);
     }
 
     // Update tracker with current state
