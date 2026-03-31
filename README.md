@@ -8,11 +8,13 @@ A real-time Discord bot that monitors your Notion Kanban database and posts upda
 ✅ **Smart Change Detection** - Only posts when properties actually change
 ✅ **Rich Embeds** - Beautiful Discord messages with before/after values
 ✅ **Multiple Properties** - Tracks any extracted Notion property changes
-✅ **Organization Filter** - Tracks only cards in the configured Notion Organization (default: SMO CAMT)
+✅ **Department Filter** - Tracks only cards in configured Notion Department values
+✅ **Per-Channel Department Routing** - Route different departments to different Discord channels
 ✅ **Reminder Check Command** - Run /remindercheck in Discord to trigger due-today/overdue reminders immediately
 ✅ **Deadline Reminders** - Sends due-today/overdue reminders and tags department roles
 ✅ **Calendar Command** - Run /calendar with range `today`, `week`, or `month` to post rich schedule embeds
 ✅ **Clear Command (Admin Only)** - Run /clear to clear all messages in the current configured channel
+✅ **Task CRUD + Move Commands** - Run /task create|read|update|move|delete to manage and move Notion tasks from Discord
 ✅ **Monthly Overview** - Auto-posts rich monthly overview on day 1 of each month
 ✅ **Error Resilient** - Gracefully handles API errors and reconnects
 
@@ -32,7 +34,7 @@ A real-time Discord bot that monitors your Notion Kanban database and posts upda
 3. Go to **Bot** section, click "Add Bot"
 4. Under TOKEN, click "Copy" to copy your bot token
 5. Go to **OAuth2 → URL Generator**
-6. Select scopes: `bot`
+6. Select scopes: `bot`, `applications.commands`
 7. Select permissions: `Send Messages`, `Embed Links`, `Manage Messages`
 8. Copy the generated URL and open it to invite bot to your server
 
@@ -78,11 +80,19 @@ Fill in `.env`:
 DISCORD_TOKEN=your_bot_token_here
 NOTION_API_KEY=your_integration_token_here
 NOTION_DATABASE_ID=your_database_id_here
+# Optional but recommended for timed tasks
+NOTION_TIMEZONE=Asia/Bangkok
 DISCORD_CHANNEL_ID=your_channel_id_here
 # Optional: comma-separated channel IDs for broadcasting to multiple channels
+# You can omit this if DISCORD_CHANNEL_DEPARTMENT_FILTERS already includes channel IDs
 # DISCORD_CHANNEL_IDS=123456789012345678,234567890123456789
 POLL_INTERVAL=60
-TRACKED_ORGANIZATION=SMO CAMT
+# Optional: role names allowed to run /task write commands (admin always allowed)
+# TASK_COMMAND_ROLE_NAMES=SMO 69
+# Optional default department filter (comma-separated). Leave unset to include all departments.
+# TRACKED_DEPARTMENT=ฝ่ายประธาน,ฝ่ายประสาน
+# Optional: channel-specific department filters
+# DISCORD_CHANNEL_DEPARTMENT_FILTERS=1339363141720477791:ฝ่ายประธาน|ฝ่ายประสาน,123456789012345678:ฝ่ายกิจกรรม
 ```
 
 ### 5. Run the Bot
@@ -126,6 +136,30 @@ Additionally:
 - Run /remindercheck in any configured Discord channel to test and trigger deadline reminders instantly.
 - Run /calendar range:today|week|month in any configured Discord channel to post rich calendar embeds.
 - Run /clear in a configured channel to clear channel messages (admin only).
+- Run `/task create title:<name> department:<comma-separated, guided> [organization:<comma-separated, guided>] start_date:<DD/MM/YYYY [AD|BC]> [end_date] [start_time] [end_time] [status:<guided>]` to create a Notion task (Admin or allowed role).
+- Run `/task read task_title:<title> [id:<page-id-or-url>]` to read a task from Notion.
+- Run `/task update task_title:<title> [id:<page-id-or-url>] [title] [department] [organization] [start_date] [end_date] [start_time] [end_time] [status]` to update one or more fields (Admin or allowed role).
+- Run `/task move to:In-Progress|In-Review|Done task_title:<title> [id:<page-id-or-url>]` to move status quickly (Admin or allowed role).
+- Run `/task delete task_title:<title> [id:<page-id-or-url>]` to archive a task in Notion (Admin or allowed role).
+
+Lookup notes:
+- For `/task read`, `/task move`, `/task update`, and `/task delete`, provide either `task_title` or `id`/URL.
+- If multiple tasks share the same title, bot will ask you to use `id`/URL.
+
+Date input notes:
+- Preferred format: `DD/MM/YYYY` (for example `31/03/2026`).
+- Era is supported by suffix: `AD` or `BC` (for example `31/03/2026 AD`, `01/01/0044 BC`).
+- `YYYY-MM-DD` and valid ISO datetime values are also accepted for compatibility.
+
+Time input notes:
+- 24-hour format: `HH:mm` (for example `14:30`).
+- 12-hour format: `h:mm AM/PM` (for example `2:30 PM`).
+- Timed values are sent with `NOTION_TIMEZONE` (default `Asia/Bangkok`) to prevent hour shifts.
+
+Organization notes:
+- `SMO CAMT` is automatically included on create/update organization writes.
+- Department and Organization support comma-separated multi-values.
+- Task write commands (`/task create`, `/task update`, `/task move`, `/task delete`) require Admin or one of the role names in `TASK_COMMAND_ROLE_NAMES` (default: `SMO 69`).
 - Monthly overview auto-posts on the first day of each month.
 - Overdue count is computed from deadline dates (Date property) when due date is in the past and task is not Done.
 - Deadline reminder messages are sent for due-today and overdue cards (once per card per day), tagging matching Department roles.
@@ -141,13 +175,26 @@ POLL_INTERVAL=300  # 5 minutes
 POLL_INTERVAL=900  # 15 minutes
 ```
 
-### Organization Scope
+### Department Scope
 
-The bot tracks only cards whose `Organization` property matches `TRACKED_ORGANIZATION`.
+The bot filters cards using the Notion `Department` property.
 
 ```env
-TRACKED_ORGANIZATION=SMO CAMT
+# Optional default department filter
+TRACKED_DEPARTMENT=ฝ่ายประธาน,ฝ่ายประสาน
 ```
+
+For per-channel routing, use `DISCORD_CHANNEL_DEPARTMENT_FILTERS`:
+
+```env
+DISCORD_CHANNEL_DEPARTMENT_FILTERS=1339363141720477791:ฝ่ายประธาน|ฝ่ายประสาน,123456789012345678:ฝ่ายกิจกรรม
+```
+
+Notes:
+- If a channel is not listed in `DISCORD_CHANNEL_DEPARTMENT_FILTERS`, it falls back to `TRACKED_DEPARTMENT`.
+- If `TRACKED_DEPARTMENT` is unset, fallback is all departments.
+- Use `channelId:*` (or `channelId:all`) for a channel to receive all departments.
+- You can remove `DISCORD_CHANNEL_IDS` when channel IDs are fully defined in `DISCORD_CHANNEL_DEPARTMENT_FILTERS`.
 
 ### Property Names
 
@@ -183,6 +230,7 @@ Edit `src/sync/syncer.js` line with `.setColor()` to change notification colors:
 **No notifications sent:**
 - Check DISCORD_CHANNEL_ID (or DISCORD_CHANNEL_IDS) is correct
 - Verify bot has permission to send messages in every configured channel
+- If using per-channel filters, verify `DISCORD_CHANNEL_DEPARTMENT_FILTERS` is correctly formatted (`channelId:Dept1|Dept2`)
 - Check console logs for errors
 
 **Rate limit issues:**

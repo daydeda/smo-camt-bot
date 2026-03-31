@@ -1,8 +1,18 @@
 import discordClient from './discord/bot.js';
-import { PermissionFlagsBits } from 'discord.js';
+import { ApplicationCommandOptionType, MessageFlags, PermissionFlagsBits } from 'discord.js';
 import fs from 'fs';
 import path from 'path';
-import { fetchDatabaseCards, formatCardForTracking } from './notion/database.js';
+import { waitForDiscordClientReady } from './discord/compat.js';
+import {
+  fetchDatabaseCards,
+  formatCardForTracking,
+  createDatabaseCard,
+  readDatabaseCard,
+  updateDatabaseCard,
+  archiveDatabaseCard,
+  resolveDatabaseCardReference,
+  getTaskAutocompleteSuggestions,
+} from './notion/database.js';
 import stateTracker from './sync/tracker.js';
 import {
   findChangedCards,
@@ -18,6 +28,7 @@ import config from './config.js';
 
 let isRunning = false;
 const PROCESS_LOCK_FILE = path.join(process.cwd(), '.notionbot.lock');
+const AUTOCOMPLETE_LIMIT = 25;
 
 function isProcessAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) {
@@ -85,35 +96,111 @@ function normalizeLookupText(value) {
   return value.trim().toLowerCase().replace(/[\s_-]+/g, ' ');
 }
 
-function getOrganizationValues(properties = {}) {
-  const organizationValue = properties?.Organization;
+function getDepartmentValues(properties = {}) {
+  const departmentValue = properties?.Department;
 
-  if (Array.isArray(organizationValue)) {
-    return organizationValue
+  if (Array.isArray(departmentValue)) {
+    return departmentValue
       .map(item => String(item).trim())
       .filter(Boolean);
   }
 
-  if (typeof organizationValue === 'string') {
-    return [organizationValue.trim()].filter(Boolean);
+  if (typeof departmentValue === 'string') {
+    return departmentValue
+      .split(',')
+      .map(item => item.trim())
+      .filter(Boolean);
   }
 
   return [];
 }
 
-function cardMatchesTrackedOrganization(card) {
-  const trackedOrgNormalized = normalizeLookupText(config.sync.trackedOrganization);
+function toNormalizedDepartmentSet(departmentFilters = []) {
+  const normalized = new Set();
 
-  if (!trackedOrgNormalized) {
+  for (const department of departmentFilters) {
+    const normalizedValue = normalizeLookupText(department);
+    if (normalizedValue) {
+      normalized.add(normalizedValue);
+    }
+  }
+
+  return normalized;
+}
+
+function cardMatchesDepartmentSet(card, departmentSet) {
+  if (!(departmentSet instanceof Set) || departmentSet.size === 0) {
     return true;
   }
 
-  const organizations = getOrganizationValues(card?.properties || {});
-  return organizations.some(org => normalizeLookupText(org) === trackedOrgNormalized);
+  const departments = getDepartmentValues(card?.properties || {});
+  return departments.some(dept => departmentSet.has(normalizeLookupText(dept)));
 }
 
-function filterCardsByTrackedOrganization(cards) {
-  return cards.filter(card => cardMatchesTrackedOrganization(card));
+function getChannelDepartmentFilters(channelId) {
+  if (Object.hasOwn(config.sync.channelDepartmentsByChannelId, channelId)) {
+    return config.sync.channelDepartmentsByChannelId[channelId];
+  }
+
+  return config.sync.trackedDepartments;
+}
+
+function hasChannelSpecificDepartmentRouting() {
+  return Object.keys(config.sync.channelDepartmentsByChannelId).length > 0;
+}
+
+function formatDepartmentFilterForDisplay(departmentFilters = []) {
+  if (!Array.isArray(departmentFilters) || departmentFilters.length === 0) {
+    return 'ALL';
+  }
+
+  return departmentFilters.join(' | ');
+}
+
+function filterCardsByDepartmentFilters(cards, departmentFilters = []) {
+  const departmentSet = toNormalizedDepartmentSet(departmentFilters);
+  return cards.filter(card => cardMatchesDepartmentSet(card, departmentSet));
+}
+
+function filterCardsForChannel(cards, channelId) {
+  // When per-channel routing is configured, do not fall back for unmapped channels.
+  if (
+    hasChannelSpecificDepartmentRouting() &&
+    !Object.hasOwn(config.sync.channelDepartmentsByChannelId, channelId)
+  ) {
+    return [];
+  }
+
+  return filterCardsByDepartmentFilters(cards, getChannelDepartmentFilters(channelId));
+}
+
+function getSyncScopeDepartmentSet() {
+  const mergedSet = new Set();
+
+  for (const channelId of config.discord.channelIds) {
+    if (
+      hasChannelSpecificDepartmentRouting() &&
+      !Object.hasOwn(config.sync.channelDepartmentsByChannelId, channelId)
+    ) {
+      continue;
+    }
+
+    const channelSet = toNormalizedDepartmentSet(getChannelDepartmentFilters(channelId));
+    if (channelSet.size === 0) {
+      return new Set();
+    }
+
+    for (const department of channelSet) {
+      mergedSet.add(department);
+    }
+  }
+
+  return mergedSet;
+}
+
+function filterCardsBySyncScope(cards) {
+  const syncScopeDepartmentSet = getSyncScopeDepartmentSet();
+  return cards.filter(card => cardMatchesDepartmentSet(card, syncScopeDepartmentSet));
 }
 
 function buildDepartmentRoleMentions(channel) {
@@ -165,8 +252,74 @@ function isConfiguredChannel(channelId) {
   return config.discord.channelIds.includes(channelId);
 }
 
+async function canUseCommandOutsideConfiguredChannel(interaction) {
+  if (interaction.commandName === 'task') {
+    return true;
+  }
+
+  if (interaction.commandName === 'clear') {
+    return false;
+  }
+
+  return isAdminInteraction(interaction) || await hasAllowedTaskRole(interaction);
+}
+
 function formatConfiguredChannelsMentionText() {
   return config.discord.channelIds.map(channelId => `<#${channelId}>`).join(', ');
+}
+
+async function safeEphemeralReply(interaction, content) {
+  const payload = {
+    content,
+    flags: MessageFlags.Ephemeral,
+  };
+
+  try {
+    if (interaction.deferred || interaction.replied) {
+      await interaction.followUp(payload);
+      return;
+    }
+
+    await interaction.reply(payload);
+  } catch (error) {
+    if (error?.code === 40060) {
+      try {
+        await interaction.followUp(payload);
+      } catch {
+        // No-op: interaction may already be closed.
+      }
+
+      return;
+    }
+
+    throw error;
+  }
+}
+
+async function safeCommandFailureReply(interaction, message) {
+  try {
+    if (interaction.deferred || interaction.replied) {
+      await interaction.editReply(message);
+      return;
+    }
+
+    await safeEphemeralReply(interaction, message);
+  } catch (error) {
+    if (error?.code === 40060) {
+      try {
+        await interaction.followUp({
+          content: message,
+          flags: MessageFlags.Ephemeral,
+        });
+      } catch {
+        // No-op: interaction may already be closed.
+      }
+
+      return;
+    }
+
+    throw error;
+  }
 }
 
 function getMonthKey(date) {
@@ -177,6 +330,290 @@ function getMonthKey(date) {
 function isAdminInteraction(interaction) {
   const permissions = interaction.memberPermissions;
   return Boolean(permissions?.has(PermissionFlagsBits.Administrator));
+}
+
+function getInteractionRoleIds(interaction) {
+  const memberRoles = interaction?.member?.roles;
+
+  if (Array.isArray(memberRoles)) {
+    return memberRoles.map(roleId => String(roleId));
+  }
+
+  const roleCache = memberRoles?.cache;
+  if (roleCache && typeof roleCache.keys === 'function') {
+    return Array.from(roleCache.keys());
+  }
+
+  return [];
+}
+
+async function getRoleNameById(guild, roleId) {
+  if (!guild || !roleId) {
+    return null;
+  }
+
+  const cachedRole = guild.roles?.cache?.get(roleId);
+  if (cachedRole?.name) {
+    return cachedRole.name;
+  }
+
+  if (typeof guild.roles?.fetch !== 'function') {
+    return null;
+  }
+
+  try {
+    const fetchedRole = await guild.roles.fetch(roleId);
+    return fetchedRole?.name || null;
+  } catch {
+    return null;
+  }
+}
+
+async function hasAllowedTaskRole(interaction) {
+  const allowedRoleNames = config.permissions?.taskCommandRoleNames || [];
+  if (!Array.isArray(allowedRoleNames) || allowedRoleNames.length === 0) {
+    return false;
+  }
+
+  const normalizedAllowedRoleNames = new Set(
+    allowedRoleNames
+      .map(roleName => normalizeLookupText(roleName))
+      .filter(Boolean)
+  );
+  if (normalizedAllowedRoleNames.size === 0) {
+    return false;
+  }
+
+  const guild = interaction?.guild;
+  if (!guild) {
+    return false;
+  }
+
+  const roleIds = getInteractionRoleIds(interaction);
+  for (const roleId of roleIds) {
+    const roleName = await getRoleNameById(guild, roleId);
+    if (!roleName) {
+      continue;
+    }
+
+    if (normalizedAllowedRoleNames.has(normalizeLookupText(roleName))) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+async function canManageTaskCommands(interaction) {
+  return isAdminInteraction(interaction) || await hasAllowedTaskRole(interaction);
+}
+
+function formatScalarReplyValue(value) {
+  if (value === null || value === undefined || value === '') {
+    return 'None';
+  }
+
+  if (Array.isArray(value)) {
+    return value.length > 0 ? value.join(', ') : 'None';
+  }
+
+  if (typeof value === 'object') {
+    return JSON.stringify(value);
+  }
+
+  return String(value);
+}
+
+function getTaskTitle(card) {
+  const properties = card?.properties || {};
+  const directTitle = properties['กิจกรรม'];
+
+  if (typeof directTitle === 'string' && directTitle.trim().length > 0) {
+    return directTitle.trim();
+  }
+
+  const firstStringValue = Object.values(properties).find(
+    value => typeof value === 'string' && value.trim().length > 0
+  );
+
+  if (typeof firstStringValue === 'string') {
+    return firstStringValue;
+  }
+
+  return `Card ${card.id.slice(0, 8)}`;
+}
+
+function formatTaskReply(card, titlePrefix = 'Task') {
+  const properties = card?.properties || {};
+  const title = getTaskTitle(card);
+  const organizationValue = Object.entries(properties).find(
+    ([key]) => key.toLowerCase().includes('organization') || key.toLowerCase().includes('organisation')
+  )?.[1] ?? properties.Organization;
+
+  return [
+    `**${titlePrefix}:** ${title}`,
+    `**ID:** ${card.id}`,
+    `**Department:** ${formatScalarReplyValue(properties.Department)}`,
+    `**Organization:** ${formatScalarReplyValue(organizationValue)}`,
+    `**Status:** ${formatScalarReplyValue(properties.Status)}`,
+    `**Date:** ${formatScalarReplyValue(properties.Date)}`,
+    `**URL:** ${card.url || 'N/A'}`,
+  ].join('\n');
+}
+
+function getTaskUpdatePayloadFromInteraction(interaction) {
+  const title = interaction.options.getString('title');
+  const department = interaction.options.getString('department');
+  const organization = interaction.options.getString('organization');
+  const startDate = interaction.options.getString('start_date');
+  const endDate = interaction.options.getString('end_date');
+  const startTime = interaction.options.getString('start_time');
+  const endTime = interaction.options.getString('end_time');
+  const status = interaction.options.getString('status');
+
+  const updates = {};
+  if (typeof title === 'string') {
+    updates.title = title;
+  }
+  if (typeof department === 'string') {
+    updates.department = department;
+  }
+  if (typeof organization === 'string') {
+    updates.organization = organization;
+  }
+  if (
+    typeof startDate === 'string' ||
+    typeof endDate === 'string' ||
+    typeof startTime === 'string' ||
+    typeof endTime === 'string'
+  ) {
+    updates.date = {
+      startDate,
+      endDate,
+      startTime,
+      endTime,
+    };
+  }
+  if (typeof status === 'string') {
+    updates.status = status;
+  }
+
+  return updates;
+}
+
+function formatDateForAutocomplete(date) {
+  const day = String(date.getDate()).padStart(2, '0');
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const year = date.getFullYear();
+  return `${day}/${month}/${year}`;
+}
+
+function buildDateAutocompleteChoices(focusedValue = '') {
+  const normalizedFocused = String(focusedValue || '').trim().toLowerCase();
+  const now = new Date();
+  const candidates = [];
+
+  for (let offset = 0; offset <= 14; offset += 1) {
+    const date = new Date(now.getFullYear(), now.getMonth(), now.getDate() + offset);
+    const formatted = formatDateForAutocomplete(date);
+    candidates.push(formatted, `${formatted} AD`);
+  }
+
+  candidates.push('01/01/0044 BC', '15/03/0044 BC');
+
+  const seen = new Set();
+  return candidates
+    .filter(value => {
+      const normalized = value.toLowerCase();
+      if (seen.has(normalized)) {
+        return false;
+      }
+
+      seen.add(normalized);
+      if (!normalizedFocused) {
+        return true;
+      }
+
+      return normalized.includes(normalizedFocused);
+    })
+    .slice(0, AUTOCOMPLETE_LIMIT)
+    .map(value => ({ name: value, value }));
+}
+
+function format12HourTime(hour24, minute) {
+  const period = hour24 >= 12 ? 'PM' : 'AM';
+  const hour12 = ((hour24 + 11) % 12) + 1;
+  return `${hour12}:${String(minute).padStart(2, '0')} ${period}`;
+}
+
+function buildTimeAutocompleteChoices(focusedValue = '') {
+  const normalizedFocused = String(focusedValue || '').trim().toLowerCase();
+  const candidates = [];
+
+  for (let hour = 0; hour < 24; hour += 1) {
+    for (const minute of [0, 30]) {
+      const time24 = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;
+      const time12 = format12HourTime(hour, minute);
+      candidates.push(time24, time12);
+    }
+  }
+
+  const seen = new Set();
+  return candidates
+    .filter(value => {
+      const normalized = value.toLowerCase();
+      if (seen.has(normalized)) {
+        return false;
+      }
+
+      seen.add(normalized);
+      if (!normalizedFocused) {
+        return true;
+      }
+
+      return normalized.includes(normalizedFocused);
+    })
+    .slice(0, AUTOCOMPLETE_LIMIT)
+    .map(value => ({ name: value, value }));
+}
+
+async function handleTaskAutocomplete(interaction) {
+  if (interaction.commandName !== 'task') {
+    return;
+  }
+
+  const focused = interaction.options.getFocused(true);
+  if (!focused) {
+    await interaction.respond([]);
+    return;
+  }
+
+  if (focused.name === 'start_date' || focused.name === 'end_date') {
+    await interaction.respond(buildDateAutocompleteChoices(String(focused.value || '')));
+    return;
+  }
+
+  if (focused.name === 'start_time' || focused.name === 'end_time') {
+    await interaction.respond(buildTimeAutocompleteChoices(String(focused.value || '')));
+    return;
+  }
+
+  if (
+    focused.name !== 'department' &&
+    focused.name !== 'status' &&
+    focused.name !== 'organization'
+  ) {
+    await interaction.respond([]);
+    return;
+  }
+
+  try {
+    const suggestions = await getTaskAutocompleteSuggestions(focused.name, String(focused.value || ''));
+    await interaction.respond(suggestions);
+  } catch (error) {
+    console.error('Task autocomplete failed:', error.message);
+    await interaction.respond([]);
+  }
 }
 
 async function fetchConfiguredChannels() {
@@ -258,15 +695,15 @@ async function sendEmbedsToChannel(channel, embeds, options = {}) {
 async function runReminderCheck(channels) {
   const cards = await fetchDatabaseCards();
   const formattedCards = cards.map(formatCardForTracking);
-  const trackedCards = filterCardsByTrackedOrganization(formattedCards);
   const reminderStateByCardId = stateTracker.getMeta('deadlineReminderByCardId', {});
   const reminderCounts = [];
 
   for (const channel of channels) {
+    const channelTrackedCards = filterCardsForChannel(formattedCards, channel.id);
     const departmentRoleMentions = buildDepartmentRoleMentions(channel);
 
     const reminderResult = createDeadlineReminderEmbeds(
-      trackedCards,
+      channelTrackedCards,
       departmentRoleMentions,
       reminderStateByCardId,
       new Date(),
@@ -286,10 +723,10 @@ async function runReminderCheck(channels) {
 async function runCalendarOverview(channels, range = 'week', now = new Date()) {
   const cards = await fetchDatabaseCards();
   const formattedCards = cards.map(formatCardForTracking);
-  const trackedCards = filterCardsByTrackedOrganization(formattedCards);
 
   for (const channel of channels) {
-    const embeds = createCalendarOverviewEmbeds(trackedCards, range, now);
+    const channelTrackedCards = filterCardsForChannel(formattedCards, channel.id);
+    const embeds = createCalendarOverviewEmbeds(channelTrackedCards, range, now);
     await sendEmbedsToChannel(channel, embeds, { singleMessage: true });
   }
 }
@@ -297,10 +734,10 @@ async function runCalendarOverview(channels, range = 'week', now = new Date()) {
 async function runMonthlyOverview(channels, now = new Date()) {
   const cards = await fetchDatabaseCards();
   const formattedCards = cards.map(formatCardForTracking);
-  const trackedCards = filterCardsByTrackedOrganization(formattedCards);
 
   for (const channel of channels) {
-    const embeds = createCalendarOverviewEmbeds(trackedCards, 'month', now, {
+    const channelTrackedCards = filterCardsForChannel(formattedCards, channel.id);
+    const embeds = createCalendarOverviewEmbeds(channelTrackedCards, 'month', now, {
       title: '📅 Monthly Overview',
     });
     await sendEmbedsToChannel(channel, embeds, { singleMessage: true });
@@ -383,20 +820,236 @@ async function registerSlashCommands(channel) {
       name: 'clear',
       description: 'Admin only: clear all messages in this configured channel',
     },
+    {
+      name: 'task',
+      description: 'CRUD task records in the connected Notion database',
+      options: [
+        {
+          type: ApplicationCommandOptionType.Subcommand,
+          name: 'create',
+          description: 'Create a new Notion task',
+          options: [
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'title',
+              description: 'Task title',
+              required: true,
+            },
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'department',
+              description: 'Department(s), comma-separated (choose from suggestions)',
+              required: true,
+              autocomplete: true,
+            },
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'start_date',
+              description: 'Start date: DD/MM/YYYY [AD|BC]',
+              required: true,
+              autocomplete: true,
+            },
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'organization',
+              description: 'Organization(s), comma-separated. SMO CAMT is always included',
+              required: false,
+              autocomplete: true,
+            },
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'end_date',
+              description: 'End date: DD/MM/YYYY [AD|BC] (optional)',
+              required: false,
+              autocomplete: true,
+            },
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'start_time',
+              description: 'Start time: HH:mm or h:mm AM/PM (optional)',
+              required: false,
+              autocomplete: true,
+            },
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'end_time',
+              description: 'End time: HH:mm or h:mm AM/PM (optional)',
+              required: false,
+              autocomplete: true,
+            },
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'status',
+              description: 'Optional status (choose from suggestions)',
+              required: false,
+              autocomplete: true,
+            },
+          ],
+        },
+        {
+          type: ApplicationCommandOptionType.Subcommand,
+          name: 'read',
+          description: 'Read task details by title or page ID/URL',
+          options: [
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'id',
+              description: 'Notion page ID or URL (optional if task_title is provided)',
+              required: false,
+            },
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'task_title',
+              description: 'Task title to identify task (optional if id is provided)',
+              required: false,
+            },
+          ],
+        },
+        {
+          type: ApplicationCommandOptionType.Subcommand,
+          name: 'update',
+          description: 'Update fields of an existing Notion task',
+          options: [
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'id',
+              description: 'Notion page ID or URL (optional if task_title is provided)',
+              required: false,
+            },
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'task_title',
+              description: 'Task title to identify task (optional if id is provided)',
+              required: false,
+            },
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'title',
+              description: 'New task title',
+              required: false,
+            },
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'department',
+              description: 'New department(s), comma-separated',
+              required: false,
+              autocomplete: true,
+            },
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'organization',
+              description: 'New organization(s), comma-separated. SMO CAMT is always included',
+              required: false,
+              autocomplete: true,
+            },
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'start_date',
+              description: 'New start date: DD/MM/YYYY [AD|BC]',
+              required: false,
+              autocomplete: true,
+            },
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'end_date',
+              description: 'New end date: DD/MM/YYYY [AD|BC]',
+              required: false,
+              autocomplete: true,
+            },
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'start_time',
+              description: 'New start time: HH:mm or h:mm AM/PM',
+              required: false,
+              autocomplete: true,
+            },
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'end_time',
+              description: 'New end time: HH:mm or h:mm AM/PM',
+              required: false,
+              autocomplete: true,
+            },
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'status',
+              description: 'New status (choose from suggestions)',
+              required: false,
+              autocomplete: true,
+            },
+          ],
+        },
+        {
+          type: ApplicationCommandOptionType.Subcommand,
+          name: 'move',
+          description: 'Move task status quickly (title or id/url)',
+          options: [
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'to',
+              description: 'Target status',
+              required: true,
+              choices: [
+                { name: 'In-Progress', value: 'In-Progress' },
+                { name: 'In-Review', value: 'In-Review' },
+                { name: 'Done', value: 'Done' },
+              ],
+            },
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'id',
+              description: 'Notion page ID or URL (optional if task_title is provided)',
+              required: false,
+            },
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'task_title',
+              description: 'Task title to identify task (optional if id is provided)',
+              required: false,
+            },
+          ],
+        },
+        {
+          type: ApplicationCommandOptionType.Subcommand,
+          name: 'delete',
+          description: 'Archive a task in Notion by title or page ID/URL',
+          options: [
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'id',
+              description: 'Notion page ID or URL (optional if task_title is provided)',
+              required: false,
+            },
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'task_title',
+              description: 'Task title to identify task (optional if id is provided)',
+              required: false,
+            },
+          ],
+        },
+      ],
+    },
   ];
 
   for (const commandDef of requiredCommands) {
     const exists = guild.commands.cache.find(command => command.name === commandDef.name);
-    if (exists) {
+    if (!exists) {
+      await guild.commands.create(commandDef);
       continue;
     }
 
-    await guild.commands.create(commandDef);
+    await exists.edit(commandDef);
   }
 }
 
 function registerCommandHandlers() {
   discordClient.on('interactionCreate', async interaction => {
+    if (interaction.isAutocomplete()) {
+      await handleTaskAutocomplete(interaction);
+      return;
+    }
+
     if (!interaction.isChatInputCommand()) {
       return;
     }
@@ -404,21 +1057,23 @@ function registerCommandHandlers() {
     if (
       interaction.commandName !== 'remindercheck' &&
       interaction.commandName !== 'calendar' &&
-      interaction.commandName !== 'clear'
+      interaction.commandName !== 'clear' &&
+      interaction.commandName !== 'task'
     ) {
       return;
     }
 
-    if (!isConfiguredChannel(interaction.channelId)) {
-      await interaction.reply({
-        content: `Please use this command in a configured channel: ${formatConfiguredChannelsMentionText()}.`,
-        ephemeral: true,
-      });
+    if (!isConfiguredChannel(interaction.channelId) && !(await canUseCommandOutsideConfiguredChannel(interaction))) {
+      const allowedRoles = config.permissions.taskCommandRoleNames.join(', ');
+      await safeEphemeralReply(
+        interaction,
+        `Please use this command in a configured channel: ${formatConfiguredChannelsMentionText()}. Users with Admin permission or one of these roles can use non-admin commands in any channel: ${allowedRoles}.`
+      );
       return;
     }
 
     try {
-      await interaction.deferReply({ ephemeral: true });
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
       const commandChannel = interaction.channel || await discordClient.channels.fetch(interaction.channelId);
       if (!commandChannel || typeof commandChannel.send !== 'function') {
         throw new Error('This command can only be used in a text channel.');
@@ -447,16 +1102,159 @@ function registerCommandHandlers() {
         const deletedCount = await clearChannelMessages(commandChannel);
         await interaction.editReply(`Cleared ${deletedCount} message(s) from this channel.`);
       }
+
+      if (interaction.commandName === 'task') {
+        const subcommand = interaction.options.getSubcommand(true);
+        const isWriteSubcommand =
+          subcommand === 'create' ||
+          subcommand === 'update' ||
+          subcommand === 'move' ||
+          subcommand === 'delete';
+
+        if (isWriteSubcommand && !(await canManageTaskCommands(interaction))) {
+          const allowedRoles = config.permissions.taskCommandRoleNames.join(', ');
+          await interaction.editReply(
+            `Task create/update/move/delete commands require Admin permission or one of these roles: ${allowedRoles}.`
+          );
+          return;
+        }
+
+        if (subcommand === 'create') {
+          const title = interaction.options.getString('title', true);
+          const department = interaction.options.getString('department', true);
+          const organization = interaction.options.getString('organization');
+          const startDate = interaction.options.getString('start_date', true);
+          const endDate = interaction.options.getString('end_date');
+          const startTime = interaction.options.getString('start_time');
+          const endTime = interaction.options.getString('end_time');
+          const status = interaction.options.getString('status');
+
+          const createdCard = await createDatabaseCard({
+            title,
+            department,
+            organization,
+            date: {
+              startDate,
+              endDate,
+              startTime,
+              endTime,
+            },
+            status,
+          });
+
+          await syncNotionToDiscord();
+          const instanceMarker = `instance:${process.pid} db:${String(config.notion.databaseId).slice(0, 8)}`;
+          await interaction.editReply(
+            `Task created and sync triggered (${instanceMarker}).\n\n${formatTaskReply(createdCard, 'Created')}`
+          );
+        }
+
+        if (subcommand === 'read') {
+          const pageIdOrUrl = interaction.options.getString('id');
+          const taskTitle = interaction.options.getString('task_title');
+
+          if (!pageIdOrUrl && !taskTitle) {
+            await interaction.editReply('Please provide either id/url or task_title for read.');
+            return;
+          }
+
+          const card = await resolveDatabaseCardReference({
+            pageIdOrUrl,
+            title: taskTitle,
+          });
+          await interaction.editReply(formatTaskReply(card, 'Task'));
+        }
+
+        if (subcommand === 'update') {
+          const pageIdOrUrl = interaction.options.getString('id');
+          const taskTitle = interaction.options.getString('task_title');
+
+          if (!pageIdOrUrl && !taskTitle) {
+            await interaction.editReply('Please provide either id/url or task_title for update.');
+            return;
+          }
+
+          const resolvedCard = await resolveDatabaseCardReference({
+            pageIdOrUrl,
+            title: taskTitle,
+          });
+          const updates = getTaskUpdatePayloadFromInteraction(interaction);
+
+          if (
+            updates.date &&
+            typeof updates.date === 'object' &&
+            !updates.date.startDate &&
+            (updates.date.endDate || updates.date.startTime || updates.date.endTime)
+          ) {
+            await interaction.editReply('When setting end date/time or time fields, please include start_date.');
+            return;
+          }
+
+          if (Object.keys(updates).length === 0) {
+            await interaction.editReply(
+              'No update fields provided. Set at least one of: title, department, organization, start_date, end_date, start_time, end_time, status.'
+            );
+            return;
+          }
+
+          const updatedCard = await updateDatabaseCard(resolvedCard.id, updates);
+          await syncNotionToDiscord();
+          await interaction.editReply(`Task updated and sync triggered.\n\n${formatTaskReply(updatedCard, 'Updated')}`);
+        }
+
+        if (subcommand === 'move') {
+          const targetStatus = interaction.options.getString('to', true);
+          const pageIdOrUrl = interaction.options.getString('id');
+          const taskTitle = interaction.options.getString('task_title');
+
+          if (!pageIdOrUrl && !taskTitle) {
+            await interaction.editReply('Please provide either id/url or task_title for move.');
+            return;
+          }
+
+          const resolvedCard = await resolveDatabaseCardReference({
+            pageIdOrUrl,
+            title: taskTitle,
+          });
+
+          const movedCard = await updateDatabaseCard(resolvedCard.id, {
+            status: targetStatus,
+          });
+
+          await syncNotionToDiscord();
+          await interaction.editReply(`Task moved to **${targetStatus}** and sync triggered.\n\n${formatTaskReply(movedCard, 'Moved')}`);
+        }
+
+        if (subcommand === 'delete') {
+          const pageIdOrUrl = interaction.options.getString('id');
+          const taskTitle = interaction.options.getString('task_title');
+
+          if (!pageIdOrUrl && !taskTitle) {
+            await interaction.editReply('Please provide either id/url or task_title for delete.');
+            return;
+          }
+
+          const resolvedCard = await resolveDatabaseCardReference({
+            pageIdOrUrl,
+            title: taskTitle,
+          });
+
+          const archivedCard = await archiveDatabaseCard(resolvedCard.id);
+          await syncNotionToDiscord();
+          await interaction.editReply(
+            [
+              'Task archived in Notion and sync triggered.',
+              `**Title:** ${getTaskTitle(resolvedCard)}`,
+              `**ID:** ${archivedCard.id}`,
+              `**Archived:** ${archivedCard.archived ? 'Yes' : 'No'}`,
+              `**URL:** ${archivedCard.url || 'N/A'}`,
+            ].join('\n')
+          );
+        }
+      }
     } catch (error) {
       console.error('Error running slash command:', error.message);
-      if (interaction.deferred || interaction.replied) {
-        await interaction.editReply('Command failed. Please check the bot logs.');
-      } else {
-        await interaction.reply({
-          content: 'Command failed. Please check the bot logs.',
-          ephemeral: true,
-        });
-      }
+      await safeCommandFailureReply(interaction, 'Command failed. Please check the bot logs.');
     }
   });
 }
@@ -481,9 +1279,10 @@ async function syncNotionToDiscord() {
 
     // Format cards for tracking
     const formattedCards = cards.map(formatCardForTracking);
-    const trackedCards = filterCardsByTrackedOrganization(formattedCards);
+    const syncScopeDepartmentSet = getSyncScopeDepartmentSet();
+    const trackedCards = filterCardsBySyncScope(formattedCards);
     console.log(
-      `🏷️  Tracking organization "${config.sync.trackedOrganization}": ${trackedCards.length}/${formattedCards.length} cards`
+      `🏷️  Tracking sync scope (${formatDepartmentFilterForDisplay(config.sync.trackedDepartments)} default): ${trackedCards.length}/${formattedCards.length} cards`
     );
 
     // Find changed cards
@@ -532,7 +1331,7 @@ async function syncNotionToDiscord() {
     // Detail updates should always notify for tracked existing cards, regardless of create-notice state.
     const notifiableChangedCards = changedCards;
 
-    const trackedDeletedCards = deletedCards.filter(card => cardMatchesTrackedOrganization(card));
+    const trackedDeletedCards = deletedCards.filter(card => cardMatchesDepartmentSet(card, syncScopeDepartmentSet));
     const trackedDeletedCardIdSet = new Set(trackedDeletedCards.map(card => card.id));
     const trackedDeletedCardIds = deletedCardIds.filter(cardId => trackedDeletedCardIdSet.has(cardId));
 
@@ -581,54 +1380,79 @@ async function syncNotionToDiscord() {
         throw new Error('No configured text channels are available.');
       }
 
-      const primaryChannel = channels[0];
-      const primaryMentions = buildDepartmentRoleMentions(primaryChannel);
-      const primaryReminderResult = createDeadlineReminderEmbeds(
-        trackedCards,
-        primaryMentions,
-        reminderStateByCardId,
-        now
-      );
-      const hasAnyEmbeds =
-        primaryReminderResult.embeds.length > 0 ||
-        readyCreatedCards.length > 0 ||
-        notifiableChangedCards.length > 0 ||
-        trackedDeletedCards.length > 0;
+      const channelResults = [];
+      for (const channel of channels) {
+        const channelTrackedCards = filterCardsForChannel(trackedCards, channel.id);
+        const channelReadyCreatedCards = filterCardsForChannel(readyCreatedCards, channel.id);
+        const channelNotifiableChangedCards = filterCardsForChannel(notifiableChangedCards, channel.id);
+        const channelTrackedDeletedCards = filterCardsForChannel(trackedDeletedCards, channel.id);
+        const departmentRoleMentions = buildDepartmentRoleMentions(channel);
+        const reminderResult = createDeadlineReminderEmbeds(
+          channelTrackedCards,
+          departmentRoleMentions,
+          reminderStateByCardId,
+          now
+        );
+        const createdEmbeds = createCreatedEmbeds(channelReadyCreatedCards, departmentRoleMentions);
+        const changedEmbeds = createChangeEmbeds(channelNotifiableChangedCards, departmentRoleMentions);
+        const removedEmbeds = createRemovedEmbeds(channelTrackedDeletedCards, departmentRoleMentions);
+        const embeds = [...reminderResult.embeds, ...createdEmbeds, ...changedEmbeds, ...removedEmbeds];
+
+        channelResults.push({
+          channel,
+          embeds,
+          reminderResult,
+          channelReadyCreatedCards,
+        });
+      }
+
+      const hasAnyEmbeds = channelResults.some(result => result.embeds.length > 0);
 
       if (!hasAnyEmbeds) {
         console.log('✓ No changes detected');
       } else {
-        for (const channel of channels) {
-          const departmentRoleMentions = buildDepartmentRoleMentions(channel);
-          const reminderResult = createDeadlineReminderEmbeds(
-            trackedCards,
-            departmentRoleMentions,
-            reminderStateByCardId,
-            now
-          );
-          const createdEmbeds = createCreatedEmbeds(readyCreatedCards, departmentRoleMentions);
-          const changedEmbeds = createChangeEmbeds(notifiableChangedCards, departmentRoleMentions);
-          const removedEmbeds = createRemovedEmbeds(trackedDeletedCards, departmentRoleMentions);
-          const embeds = [...reminderResult.embeds, ...createdEmbeds, ...changedEmbeds, ...removedEmbeds];
-
-          if (embeds.length === 0) {
+        for (const result of channelResults) {
+          if (result.embeds.length === 0) {
             continue;
           }
 
-          await sendEmbedsToChannel(channel, embeds);
+          await sendEmbedsToChannel(result.channel, result.embeds);
         }
 
-        for (const card of readyCreatedCards) {
-          creationNotifiedByCardId[card.id] = true;
+        const notifiedCreatedCardIdSet = new Set();
+        for (const result of channelResults) {
+          for (const card of result.channelReadyCreatedCards) {
+            notifiedCreatedCardIdSet.add(card.id);
+          }
         }
-        creationMetaChanged = true;
+
+        for (const cardId of notifiedCreatedCardIdSet) {
+          creationNotifiedByCardId[cardId] = true;
+        }
+
+        if (notifiedCreatedCardIdSet.size > 0) {
+          creationMetaChanged = true;
+        }
+
+        const totalReminderCount = channelResults.reduce(
+          (sum, result) => sum + result.reminderResult.embeds.length,
+          0
+        );
 
         console.log(
-          `✅ Posted updates to ${channels.length} channel(s) (reminders=${primaryReminderResult.embeds.length})`
+          `✅ Posted updates to ${channels.length} channel(s) (reminders=${totalReminderCount})`
         );
       }
 
-      stateTracker.setMeta('deadlineReminderByCardId', primaryReminderResult.reminderStateByCardId);
+      let mergedReminderStateByCardId = { ...reminderStateByCardId };
+      for (const result of channelResults) {
+        mergedReminderStateByCardId = {
+          ...mergedReminderStateByCardId,
+          ...result.reminderResult.reminderStateByCardId,
+        };
+      }
+
+      stateTracker.setMeta('deadlineReminderByCardId', mergedReminderStateByCardId);
 
       const currentMonthKey = getMonthKey(now);
       const lastMonthlyOverviewKey = stateTracker.getMeta('monthlyOverviewLastSentKey', null);
@@ -666,17 +1490,20 @@ async function startBot() {
     await discordClient.login(config.discord.token);
 
     // Wait for Discord bot to be ready
-    await new Promise(resolve => {
-      if (discordClient.isReady()) {
-        resolve();
-      } else {
-        discordClient.once('ready', resolve);
-      }
-    });
+    await waitForDiscordClientReady(discordClient);
 
     console.log(`✅ Bot ready! Connected to Discord`);
     console.log(`📌 Watching Notion database: ${config.notion.databaseId}`);
-    console.log(`🏷️  Tracked organization: ${config.sync.trackedOrganization}`);
+    console.log(
+      `🏷️  Default department filter: ${formatDepartmentFilterForDisplay(config.sync.trackedDepartments)}`
+    );
+    if (Object.keys(config.sync.channelDepartmentsByChannelId).length > 0) {
+      console.log('🏷️  Channel-specific department filters:');
+      for (const channelId of config.discord.channelIds) {
+        const channelFilters = getChannelDepartmentFilters(channelId);
+        console.log(`   - ${channelId}: ${formatDepartmentFilterForDisplay(channelFilters)}`);
+      }
+    }
     console.log(`💬 Posting updates to Discord channels: ${config.discord.channelIds.join(', ')}`);
     const configuredChannels = await fetchConfiguredChannels();
     if (configuredChannels.length === 0) {
@@ -693,7 +1520,8 @@ async function startBot() {
       await registerSlashCommands(configuredChannel);
       registeredGuildIds.add(guildId);
     }
-    console.log('⌨️  Manual commands enabled: /remindercheck, /calendar, /clear');
+    console.log('⌨️  Manual commands enabled: /remindercheck, /calendar, /clear, /task');
+    console.log(`🔐 Task write access roles: ${config.permissions.taskCommandRoleNames.join(', ')} (Admin also allowed)`);
     console.log(`⏱️  Polling interval: ${config.polling.intervalSeconds} seconds\n`);
 
     registerCommandHandlers();

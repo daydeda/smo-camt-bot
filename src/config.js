@@ -3,7 +3,7 @@ import 'dotenv/config.js';
 const MIN_POLL_INTERVAL_SECONDS = 15;
 const MAX_POLL_INTERVAL_SECONDS = 3600;
 
-function parseDiscordChannelIds(rawList, fallbackSingle) {
+function parseDiscordChannelIds(rawList, fallbackSingle, additionalIds = []) {
   const values = [];
 
   if (typeof rawList === 'string' && rawList.trim().length > 0) {
@@ -14,7 +14,73 @@ function parseDiscordChannelIds(rawList, fallbackSingle) {
     values.push(fallbackSingle.trim());
   }
 
+  if (Array.isArray(additionalIds) && additionalIds.length > 0) {
+    values.push(...additionalIds.map(item => String(item).trim()).filter(Boolean));
+  }
+
   return Array.from(new Set(values));
+}
+
+function parseScopeList(rawValue, separator = ',') {
+  if (typeof rawValue !== 'string' || rawValue.trim().length === 0) {
+    return [];
+  }
+
+  return Array.from(
+    new Set(
+      rawValue
+        .split(separator)
+        .map(item => item.trim())
+        .filter(Boolean)
+    )
+  );
+}
+
+function parseChannelDepartmentFilters(rawValue) {
+  if (typeof rawValue !== 'string' || rawValue.trim().length === 0) {
+    return {};
+  }
+
+  const mapping = {};
+  const entries = rawValue
+    .split(',')
+    .map(item => item.trim())
+    .filter(Boolean);
+
+  for (const entry of entries) {
+    const match = entry.match(/^(\d+)\s*[:=]\s*(.*)$/);
+    if (!match) {
+      throw new Error(
+        `Invalid DISCORD_CHANNEL_DEPARTMENT_FILTERS entry "${entry}". Use format channelId:Dept1|Dept2`
+      );
+    }
+
+    const channelId = match[1];
+    const departmentsRaw = match[2]?.trim() || '';
+    const isAllDepartments =
+      departmentsRaw.length === 0 ||
+      departmentsRaw === '*' ||
+      departmentsRaw.toLowerCase() === 'all';
+    const departments = isAllDepartments
+      ? []
+      : parseScopeList(departmentsRaw, '|');
+
+    if (departments.length === 0) {
+      mapping[channelId] = [];
+      continue;
+    }
+
+    if (!Object.hasOwn(mapping, channelId)) {
+      mapping[channelId] = departments;
+      continue;
+    }
+
+    if (mapping[channelId].length > 0) {
+      mapping[channelId] = Array.from(new Set([...mapping[channelId], ...departments]));
+    }
+  }
+
+  return mapping;
 }
 
 function parsePollInterval(rawValue) {
@@ -39,21 +105,39 @@ function ensureNotPlaceholder(value, envName) {
 }
 
 // Load and validate environment variables
+const trackedDepartments = parseScopeList(
+  process.env.TRACKED_DEPARTMENT || '',
+  ','
+);
+const taskCommandRoleNames = parseScopeList(
+  process.env.TASK_COMMAND_ROLE_NAMES || 'SMO 69',
+  ','
+);
+const channelDepartmentsByChannelId = parseChannelDepartmentFilters(
+  process.env.DISCORD_CHANNEL_DEPARTMENT_FILTERS
+);
 const config = {
   discord: {
     token: process.env.DISCORD_TOKEN,
     channelId: process.env.DISCORD_CHANNEL_ID,
     channelIds: parseDiscordChannelIds(
       process.env.DISCORD_CHANNEL_IDS,
-      process.env.DISCORD_CHANNEL_ID
+      process.env.DISCORD_CHANNEL_ID,
+      Object.keys(channelDepartmentsByChannelId)
     ),
   },
   notion: {
     apiKey: process.env.NOTION_API_KEY,
     databaseId: process.env.NOTION_DATABASE_ID,
+    timezone: (process.env.NOTION_TIMEZONE || 'Asia/Bangkok').trim(),
   },
   sync: {
-    trackedOrganization: (process.env.TRACKED_ORGANIZATION || 'SMO CAMT').trim(),
+    trackedDepartment: trackedDepartments[0] || '',
+    trackedDepartments,
+    channelDepartmentsByChannelId,
+  },
+  permissions: {
+    taskCommandRoleNames,
   },
   polling: {
     intervalSeconds: parsePollInterval(process.env.POLL_INTERVAL),
@@ -81,14 +165,42 @@ function validateConfig() {
     ensureNotPlaceholder(value, path);
   }
 
+  ensureNotPlaceholder(config.notion.timezone, 'NOTION_TIMEZONE');
+
   if (config.discord.channelIds.length === 0) {
-    throw new Error('Missing Discord channel config: set DISCORD_CHANNEL_ID or DISCORD_CHANNEL_IDS.');
+    throw new Error(
+      'Missing Discord channel config: set DISCORD_CHANNEL_ID, DISCORD_CHANNEL_IDS, or DISCORD_CHANNEL_DEPARTMENT_FILTERS.'
+    );
   }
 
   for (const channelId of config.discord.channelIds) {
     ensureNotPlaceholder(channelId, 'DISCORD_CHANNEL_IDS');
     if (!/^\d+$/.test(String(channelId))) {
       throw new Error('All Discord channel IDs must be numeric Discord snowflakes.');
+    }
+  }
+
+  for (const department of config.sync.trackedDepartments) {
+    ensureNotPlaceholder(department, 'TRACKED_DEPARTMENT');
+  }
+
+  for (const roleName of config.permissions.taskCommandRoleNames) {
+    ensureNotPlaceholder(roleName, 'TASK_COMMAND_ROLE_NAMES');
+  }
+
+  for (const [channelId, departments] of Object.entries(config.sync.channelDepartmentsByChannelId)) {
+    if (!/^\d+$/.test(String(channelId))) {
+      throw new Error('Channel IDs in DISCORD_CHANNEL_DEPARTMENT_FILTERS must be numeric Discord snowflakes.');
+    }
+
+    if (!config.discord.channelIds.includes(channelId)) {
+      throw new Error(
+        `Channel ${channelId} in DISCORD_CHANNEL_DEPARTMENT_FILTERS is not listed in DISCORD_CHANNEL_ID/DISCORD_CHANNEL_IDS.`
+      );
+    }
+
+    for (const department of departments) {
+      ensureNotPlaceholder(department, 'DISCORD_CHANNEL_DEPARTMENT_FILTERS');
     }
   }
 }
