@@ -1,5 +1,5 @@
 import discordClient from './discord/bot.js';
-import { ApplicationCommandOptionType, MessageFlags, PermissionFlagsBits } from 'discord.js';
+import { ApplicationCommandOptionType, EmbedBuilder, MessageFlags, PermissionFlagsBits } from 'discord.js';
 import fs from 'fs';
 import path from 'path';
 import { waitForDiscordClientReady } from './discord/compat.js';
@@ -29,6 +29,9 @@ import config from './config.js';
 let isRunning = false;
 const PROCESS_LOCK_FILE = path.join(process.cwd(), '.notionbot.lock');
 const AUTOCOMPLETE_LIMIT = 25;
+const TASK_VIEW_DEFAULT_LIMIT = 15;
+const TASK_VIEW_MAX_LIMIT = 50;
+const TASK_VIEW_PAGE_SIZE = 8;
 
 function isProcessAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) {
@@ -461,6 +464,163 @@ function formatTaskReply(card, titlePrefix = 'Task') {
   ].join('\n');
 }
 
+function parseCommaSeparatedLookupValues(rawValue) {
+  if (typeof rawValue !== 'string') {
+    return [];
+  }
+
+  const seen = new Set();
+  const values = [];
+
+  for (const item of rawValue.split(/[\u002C\uFF0C\u3001]/)) {
+    const value = item.trim();
+    const normalized = normalizeLookupText(value);
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+
+    seen.add(normalized);
+    values.push(value);
+  }
+
+  return values;
+}
+
+function getStatusValues(properties = {}) {
+  const statusValue = properties?.Status;
+
+  if (Array.isArray(statusValue)) {
+    return statusValue
+      .map(item => String(item).trim())
+      .filter(Boolean);
+  }
+
+  if (typeof statusValue === 'string') {
+    const normalizedValue = statusValue.trim();
+    return normalizedValue ? [normalizedValue] : [];
+  }
+
+  return [];
+}
+
+function getTaskStatusBadge(statusValue) {
+  const normalized = normalizeLookupText(String(statusValue || ''));
+  if (!normalized) {
+    return '⚪ Unknown';
+  }
+
+  if (normalized.includes('done')) {
+    return '✅ Done';
+  }
+
+  if (normalized.includes('review')) {
+    return '🧐 In Review';
+  }
+
+  if (normalized.includes('progress')) {
+    return '🚧 In Progress';
+  }
+
+  if (normalized.includes('not started')) {
+    return '📝 Not Started';
+  }
+
+  return `🔹 ${statusValue}`;
+}
+
+function truncateText(value, maxLength = 120) {
+  const text = String(value || '').trim();
+  if (text.length <= maxLength) {
+    return text;
+  }
+
+  return `${text.slice(0, Math.max(maxLength - 3, 1))}...`;
+}
+
+function buildTaskViewEmbeds(cards, { departmentFilters = [], statusFilters = [], limit = TASK_VIEW_DEFAULT_LIMIT } = {}) {
+  const safeLimit = Math.min(Math.max(Number(limit) || TASK_VIEW_DEFAULT_LIMIT, 1), TASK_VIEW_MAX_LIMIT);
+  const sortedCards = [...cards].sort((left, right) => {
+    return getTaskTitle(left).localeCompare(getTaskTitle(right), 'th');
+  });
+  const includedCards = sortedCards.slice(0, safeLimit);
+
+  const summaryEmbed = new EmbedBuilder()
+    .setColor(cards.length > 0 ? 0x1D4ED8 : 0x6B7280)
+    .setTitle('📋 Department Task View')
+    .addFields(
+      {
+        name: 'Departments',
+        value: departmentFilters.join(', ') || 'All',
+        inline: false,
+      },
+      {
+        name: 'Status Filter',
+        value: statusFilters.join(', ') || 'All',
+        inline: true,
+      },
+      {
+        name: 'Matched',
+        value: String(cards.length),
+        inline: true,
+      },
+      {
+        name: 'Shown',
+        value: String(includedCards.length),
+        inline: true,
+      }
+    )
+    .setTimestamp(new Date());
+
+  if (cards.length === 0) {
+    summaryEmbed.setDescription('No tasks matched this filter. Try a different department or status.');
+    return [summaryEmbed];
+  }
+
+  if (cards.length > safeLimit) {
+    summaryEmbed.setDescription(
+      `Showing the first ${includedCards.length} task(s) based on your limit (${safeLimit}).`
+    );
+  } else {
+    summaryEmbed.setDescription('Showing all matching tasks.');
+  }
+
+  const detailEmbeds = [];
+  for (let i = 0; i < includedCards.length; i += TASK_VIEW_PAGE_SIZE) {
+    const chunk = includedCards.slice(i, i + TASK_VIEW_PAGE_SIZE);
+    const lines = chunk.map((card, index) => {
+      const sequence = i + index + 1;
+      const title = truncateText(getTaskTitle(card), 100);
+      const status = formatScalarReplyValue(card?.properties?.Status);
+      const date = truncateText(formatScalarReplyValue(card?.properties?.Date), 80);
+      const idShort = card.id.slice(0, 8);
+      const link = card.url ? `<${card.url}>` : 'N/A';
+
+      return [
+        `**${sequence}. ${title}**`,
+        `${getTaskStatusBadge(status)} | 🗓️ ${date}`,
+        `🆔 ${idShort} | ${link}`,
+      ].join('\n');
+    });
+
+    const detailEmbed = new EmbedBuilder()
+      .setColor(0x0EA5E9)
+      .setTitle(`Tasks ${i + 1}-${i + chunk.length}`)
+      .setDescription(lines.join('\n\n'));
+
+    detailEmbeds.push(detailEmbed);
+  }
+
+  const embeds = [summaryEmbed, ...detailEmbeds];
+  if (cards.length > includedCards.length) {
+    const remainingCount = cards.length - includedCards.length;
+    embeds[embeds.length - 1].setFooter({
+      text: `${remainingCount} more task(s) not shown. Increase limit (max ${TASK_VIEW_MAX_LIMIT}) to view more.`,
+    });
+  }
+
+  return embeds;
+}
+
 function getTaskUpdatePayloadFromInteraction(interaction) {
   const title = interaction.options.getString('title');
   const department = interaction.options.getString('department');
@@ -822,7 +982,7 @@ async function registerSlashCommands(channel) {
     },
     {
       name: 'task',
-      description: 'CRUD task records in the connected Notion database',
+      description: 'Manage task records in the connected Notion database',
       options: [
         {
           type: ApplicationCommandOptionType.Subcommand,
@@ -902,6 +1062,35 @@ async function registerSlashCommands(channel) {
               name: 'task_title',
               description: 'Task title to identify task (optional if id is provided)',
               required: false,
+            },
+          ],
+        },
+        {
+          type: ApplicationCommandOptionType.Subcommand,
+          name: 'view',
+          description: 'View tasks by department, optionally filtered by status',
+          options: [
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'department',
+              description: 'Department(s), comma-separated (choose from suggestions)',
+              required: true,
+              autocomplete: true,
+            },
+            {
+              type: ApplicationCommandOptionType.String,
+              name: 'status',
+              description: 'Optional status filter(s), comma-separated',
+              required: false,
+              autocomplete: true,
+            },
+            {
+              type: ApplicationCommandOptionType.Integer,
+              name: 'limit',
+              description: 'Max tasks to show (default 15, max 50)',
+              required: false,
+              min_value: 1,
+              max_value: 50,
             },
           ],
         },
@@ -1163,6 +1352,57 @@ function registerCommandHandlers() {
             title: taskTitle,
           });
           await interaction.editReply(formatTaskReply(card, 'Task'));
+        }
+
+        if (subcommand === 'view') {
+          const departmentInput = interaction.options.getString('department', true);
+          const statusInput = interaction.options.getString('status');
+          const limitInput = interaction.options.getInteger('limit');
+
+          const departmentFilters = parseCommaSeparatedLookupValues(departmentInput);
+          const statusFilters = parseCommaSeparatedLookupValues(statusInput || '');
+
+          if (departmentFilters.length === 0) {
+            await interaction.editReply('Please provide at least one department for task view.');
+            return;
+          }
+
+          const normalizedDepartmentSet = toNormalizedDepartmentSet(departmentFilters);
+          const normalizedStatusSet = new Set(
+            statusFilters
+              .map(statusValue => normalizeLookupText(statusValue))
+              .filter(Boolean)
+          );
+
+          const cards = await fetchDatabaseCards();
+          const matchingCards = cards.filter(card => {
+            const cardProperties = card?.properties || {};
+            const departmentMatched = getDepartmentValues(cardProperties)
+              .some(departmentValue => normalizedDepartmentSet.has(normalizeLookupText(departmentValue)));
+
+            if (!departmentMatched) {
+              return false;
+            }
+
+            if (normalizedStatusSet.size === 0) {
+              return true;
+            }
+
+            return getStatusValues(cardProperties)
+              .some(statusValue => normalizedStatusSet.has(normalizeLookupText(statusValue)));
+          });
+
+          const taskViewEmbeds = buildTaskViewEmbeds(matchingCards, {
+            departmentFilters,
+            statusFilters,
+            limit: limitInput || TASK_VIEW_DEFAULT_LIMIT,
+          });
+
+          await sendEmbedsToChannel(commandChannel, taskViewEmbeds, { singleMessage: true });
+
+          await interaction.editReply(
+            `Task view posted in <#${commandChannel.id}>. Matched ${matchingCards.length} task(s).`
+          );
         }
 
         if (subcommand === 'update') {

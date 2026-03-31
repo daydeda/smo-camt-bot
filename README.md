@@ -138,6 +138,7 @@ Additionally:
 - Run /clear in a configured channel to clear channel messages (admin only).
 - Run `/task create title:<name> department:<comma-separated, guided> [organization:<comma-separated, guided>] start_date:<DD/MM/YYYY [AD|BC]> [end_date] [start_time] [end_time] [status:<guided>]` to create a Notion task (Admin or allowed role).
 - Run `/task read task_title:<title> [id:<page-id-or-url>]` to read a task from Notion.
+- Run `/task view department:<comma-separated, guided> [status:<comma-separated, guided>] [limit:<1-50>]` to list tasks for one or more departments.
 - Run `/task update task_title:<title> [id:<page-id-or-url>] [title] [department] [organization] [start_date] [end_date] [start_time] [end_time] [status]` to update one or more fields (Admin or allowed role).
 - Run `/task move to:In-Progress|In-Review|Done task_title:<title> [id:<page-id-or-url>]` to move status quickly (Admin or allowed role).
 - Run `/task delete task_title:<title> [id:<page-id-or-url>]` to archive a task in Notion (Admin or allowed role).
