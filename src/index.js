@@ -1517,7 +1517,13 @@ async function startBot() {
         continue;
       }
 
-      await registerSlashCommands(configuredChannel);
+      try {
+        await registerSlashCommands(configuredChannel);
+      } catch (error) {
+        console.error(
+          `⚠️  Failed to register slash commands for guild ${guildId}: ${error.message}`
+        );
+      }
       registeredGuildIds.add(guildId);
     }
     console.log('⌨️  Manual commands enabled: /remindercheck, /calendar, /clear, /task');

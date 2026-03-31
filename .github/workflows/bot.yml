@@ -110,8 +110,48 @@ jobs:
 
           set +e
           set -o pipefail
-          timeout --signal=SIGTERM 350m npm start 2>&1 | tee bot.log
-          EXIT_CODE=${PIPESTATUS[0]}
+
+          END_AT=$(( $(date +%s) + 350 * 60 ))
+          MAX_RESTARTS=3
+          ATTEMPT=1
+          EXIT_CODE=0
+          : > bot.log
+
+          while true; do
+            NOW=$(date +%s)
+            REMAINING=$(( END_AT - NOW ))
+
+            if [ "$REMAINING" -le 0 ]; then
+              EXIT_CODE=124
+              break
+            fi
+
+            echo "Starting bot attempt ${ATTEMPT} (${REMAINING}s remaining)"
+            timeout --signal=SIGTERM "${REMAINING}s" npm start 2>&1 | tee -a bot.log
+            EXIT_CODE=${PIPESTATUS[0]}
+            echo "Bot attempt ${ATTEMPT} exited with code ${EXIT_CODE}"
+
+            # timeout exits with 124 when the window ends (expected).
+            if [ "$EXIT_CODE" -eq 124 ]; then
+              break
+            fi
+
+            # Bot exited on its own before timeout; restart to keep runner alive.
+            if [ "$EXIT_CODE" -eq 0 ]; then
+              ATTEMPT=$((ATTEMPT + 1))
+              sleep 5
+              continue
+            fi
+
+            if [ "$ATTEMPT" -ge "$MAX_RESTARTS" ]; then
+              break
+            fi
+
+            ATTEMPT=$((ATTEMPT + 1))
+            echo "Unexpected bot exit (${EXIT_CODE}); retrying in 10s..."
+            sleep 10
+          done
+
           echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
 
           # timeout exits with 124; treat it as expected so next schedule can continue.
