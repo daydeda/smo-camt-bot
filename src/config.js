@@ -41,10 +41,27 @@ function parseChannelDepartmentFilters(rawValue) {
     return {};
   }
 
+  let normalizedRawValue = rawValue
+    .replace(/\r/g, '')
+    .replace(/\n/g, ',')
+    .trim();
+
+  // Allow a quoted full value in CI secrets, e.g. "123:Dept,456:Dept".
+  if (
+    (normalizedRawValue.startsWith('"') && normalizedRawValue.endsWith('"')) ||
+    (normalizedRawValue.startsWith("'") && normalizedRawValue.endsWith("'"))
+  ) {
+    normalizedRawValue = normalizedRawValue.slice(1, -1).trim();
+  }
+
+  if (normalizedRawValue.length === 0) {
+    return {};
+  }
+
   const mapping = {};
-  const entries = rawValue
+  const entries = normalizedRawValue
     .split(',')
-    .map(item => item.trim())
+    .map(item => item.trim().replace(/^['"]+/, '').replace(/['"]+$/, ''))
     .filter(Boolean);
 
   for (const entry of entries) {
