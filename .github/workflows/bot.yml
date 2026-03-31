@@ -94,9 +94,25 @@ jobs:
           fi
 
           if [ -n "$DISCORD_CHANNEL_DEPARTMENT_FILTERS" ]; then
-            IFS=',' read -ra FILTER_ENTRIES <<< "$DISCORD_CHANNEL_DEPARTMENT_FILTERS"
+            FILTERS_RAW="$DISCORD_CHANNEL_DEPARTMENT_FILTERS"
+            FILTERS_RAW="${FILTERS_RAW//$'\r'/}"
+
+            # Support multiline GitHub secret values by normalizing newlines to commas.
+            FILTERS_RAW="${FILTERS_RAW//$'\n'/,}"
+
+            # Allow accidental wrapping quotes around the whole secret value.
+            if [[ "$FILTERS_RAW" == \"*\" ]]; then
+              FILTERS_RAW="${FILTERS_RAW:1:${#FILTERS_RAW}-2}"
+            fi
+
+            IFS=',' read -r -a FILTER_ENTRIES <<< "$FILTERS_RAW"
             for entry in "${FILTER_ENTRIES[@]}"; do
-              if ! [[ "$entry" =~ ^[[:space:]]*[0-9]+[[:space:]]*[:=] ]]; then
+              entry="$(echo "$entry" | xargs)"
+              if [ -z "$entry" ]; then
+                continue
+              fi
+
+              if ! [[ "$entry" =~ ^[0-9]+[[:space:]]*[:=] ]]; then
                 echo "DISCORD_CHANNEL_DEPARTMENT_FILTERS entry must start with numeric channel ID and ':' or '='"
                 exit 1
               fi
