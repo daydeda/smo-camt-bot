@@ -48,6 +48,7 @@ jobs:
           DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
           DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
           DISCORD_CHANNEL_IDS: ${{ secrets.DISCORD_CHANNEL_IDS }}
+          DISCORD_CHANNEL_DEPARTMENT_FILTERS: ${{ secrets.DISCORD_CHANNEL_DEPARTMENT_FILTERS }}
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
         run: |
@@ -68,8 +69,8 @@ jobs:
             exit 1
           fi
 
-          if [ -z "$DISCORD_CHANNEL_ID" ] && [ -z "$DISCORD_CHANNEL_IDS" ]; then
-            echo "Missing channel secret: set DISCORD_CHANNEL_ID or DISCORD_CHANNEL_IDS"
+          if [ -z "$DISCORD_CHANNEL_ID" ] && [ -z "$DISCORD_CHANNEL_IDS" ] && [ -z "$DISCORD_CHANNEL_DEPARTMENT_FILTERS" ]; then
+            echo "Missing channel secret: set DISCORD_CHANNEL_ID, DISCORD_CHANNEL_IDS, or DISCORD_CHANNEL_DEPARTMENT_FILTERS"
             exit 1
           fi
 
@@ -92,12 +93,23 @@ jobs:
             fi
           fi
 
+          if [ -n "$DISCORD_CHANNEL_DEPARTMENT_FILTERS" ]; then
+            IFS=',' read -ra FILTER_ENTRIES <<< "$DISCORD_CHANNEL_DEPARTMENT_FILTERS"
+            for entry in "${FILTER_ENTRIES[@]}"; do
+              if ! [[ "$entry" =~ ^[[:space:]]*[0-9]+[[:space:]]*[:=] ]]; then
+                echo "DISCORD_CHANNEL_DEPARTMENT_FILTERS entry must start with numeric channel ID and ':' or '='"
+                exit 1
+              fi
+            done
+          fi
+
       - name: Run bot (350m window)
         id: bot_process
         env:
           DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
           DISCORD_CHANNEL_ID: ${{ secrets.DISCORD_CHANNEL_ID }}
           DISCORD_CHANNEL_IDS: ${{ secrets.DISCORD_CHANNEL_IDS }}
+          DISCORD_CHANNEL_DEPARTMENT_FILTERS: ${{ secrets.DISCORD_CHANNEL_DEPARTMENT_FILTERS }}
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
           TRACKED_ORGANIZATION: ${{ secrets.TRACKED_ORGANIZATION }}
