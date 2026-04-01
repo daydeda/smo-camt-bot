@@ -125,6 +125,15 @@ function splitDateRangeValue(value) {
   };
 }
 
+function getDatePartForEvaluation(value, { preferEnd = false } = {}) {
+  const { start, end } = splitDateRangeValue(value);
+  if (preferEnd && typeof end === 'string') {
+    return end;
+  }
+
+  return start;
+}
+
 function formatDateRangeText(value) {
   const { start, end } = splitDateRangeValue(value);
   if (!start || !end) {
@@ -154,18 +163,18 @@ function formatDateLabel(date) {
   return `${day}-${month}-${year}`;
 }
 
-function parseNotionDate(value) {
-  const { start } = splitDateRangeValue(value);
-  if (typeof start !== 'string') {
+function parseNotionDate(value, { preferEnd = false } = {}) {
+  const candidateDate = getDatePartForEvaluation(value, { preferEnd });
+  if (typeof candidateDate !== 'string') {
     return null;
   }
 
-  if (DATE_ONLY_REGEX.test(start)) {
-    const [year, month, day] = start.split('-').map(part => parseInt(part, 10));
+  if (DATE_ONLY_REGEX.test(candidateDate)) {
+    const [year, month, day] = candidateDate.split('-').map(part => parseInt(part, 10));
     return new Date(year, month - 1, day);
   }
 
-  const parsed = new Date(start);
+  const parsed = new Date(candidateDate);
   if (Number.isNaN(parsed.getTime())) {
     return null;
   }
@@ -173,9 +182,9 @@ function parseNotionDate(value) {
   return parsed;
 }
 
-function isDateTimeValue(value) {
-  const { start } = splitDateRangeValue(value);
-  return typeof start === 'string' && DATETIME_REGEX.test(start);
+function isDateTimeValue(value, { preferEnd = false } = {}) {
+  const candidateDate = getDatePartForEvaluation(value, { preferEnd });
+  return typeof candidateDate === 'string' && DATETIME_REGEX.test(candidateDate);
 }
 
 function formatScalarValue(value) {
@@ -310,6 +319,49 @@ function addSupportFooter(embed) {
   embed.setFooter({ text: SUPPORT_FOOTER_TEXT });
 }
 
+function formatActorDisplay(actorMeta) {
+  if (!actorMeta || typeof actorMeta !== 'object') {
+    return 'Unknown';
+  }
+
+  const actorName = typeof actorMeta.name === 'string' && actorMeta.name.trim().length > 0
+    ? actorMeta.name.trim()
+    : 'Unknown';
+  const actorId = typeof actorMeta.id === 'string' && actorMeta.id.trim().length > 0
+    ? actorMeta.id.replace(/-/g, '').slice(0, 8)
+    : null;
+
+  if (!actorId) {
+    return actorName;
+  }
+
+  return `${actorName} (${actorId})`;
+}
+
+function addCrudAuditField(embed, cardData, actionLabel, fallbackSource = 'Notion') {
+  const meta = cardData?.meta && typeof cardData.meta === 'object' ? cardData.meta : {};
+  const source = typeof meta.source === 'string' && meta.source.trim().length > 0
+    ? meta.source.trim()
+    : fallbackSource;
+  const actor = meta.lastEditedBy || meta.createdBy || null;
+  const actorText = formatActorDisplay(actor);
+  const editedTimeRaw = meta.lastEditedTime || meta.createdTime || null;
+  const editedTime = editedTimeRaw ? formatScalarValue(editedTimeRaw) : 'Unknown';
+
+  embed.addFields({
+    name: '🧾 CRUD Log',
+    value: truncateFieldValue(
+      [
+        `Action: ${actionLabel}`,
+        `Source: ${source}`,
+        `Actor: ${actorText}`,
+        `Edited: ${editedTime}`,
+      ].join('\n')
+    ),
+    inline: false,
+  });
+}
+
 function getCardName(card) {
   let cardName = card?.properties?.['กิจกรรม'];
 
@@ -393,7 +445,7 @@ function getDeadlineValue(properties = {}) {
   return typeof properties[deadlineKey] === 'string' ? properties[deadlineKey] : null;
 }
 
-function isOverdue(deadlineRaw, deadlineDate, statusBucket, now, nowDateOnly) {
+function isOverdue(deadlineRaw, deadlineDate, statusBucket, now, nowDateOnly, deadlineIsDateTime = false) {
   if (!deadlineDate) {
     return false;
   }
@@ -402,19 +454,19 @@ function isOverdue(deadlineRaw, deadlineDate, statusBucket, now, nowDateOnly) {
     return false;
   }
 
-  if (isDateTimeValue(deadlineRaw)) {
+  if (deadlineIsDateTime) {
     return deadlineDate.getTime() < now.getTime();
   }
 
   return toDateOnly(deadlineDate).getTime() < nowDateOnly.getTime();
 }
 
-function isDueInOneDay(deadlineRaw, deadlineDate, statusBucket, now, nowDateOnly) {
+function isDueInOneDay(deadlineRaw, deadlineDate, statusBucket, now, nowDateOnly, deadlineIsDateTime = false) {
   if (!deadlineDate || statusBucket === 'done') {
     return false;
   }
 
-  if (isDateTimeValue(deadlineRaw)) {
+  if (deadlineIsDateTime) {
     const diffMs = deadlineDate.getTime() - now.getTime();
     return diffMs > 0 && diffMs <= 24 * 60 * 60 * 1000;
   }
@@ -668,13 +720,14 @@ export function buildDailyReportSummary(cards, now = new Date()) {
     const statusValue = getStatusValue(properties);
     const statusBucket = mapStatusBucket(statusValue);
     const deadlineRaw = getDeadlineValue(properties);
-    const deadlineDate = parseNotionDate(deadlineRaw);
+    const deadlineDate = parseNotionDate(deadlineRaw, { preferEnd: true });
+    const deadlineIsDateTime = isDateTimeValue(deadlineRaw, { preferEnd: true });
 
     if (STATUS_BUCKETS.includes(statusBucket)) {
       counts[statusBucket] += 1;
     }
 
-    if (isOverdue(deadlineRaw, deadlineDate, statusBucket, now, nowDateOnly)) {
+    if (isOverdue(deadlineRaw, deadlineDate, statusBucket, now, nowDateOnly, deadlineIsDateTime)) {
       counts.overdue += 1;
     }
   }
@@ -726,10 +779,18 @@ export function createDeadlineReminderEmbeds(
     const statusValue = getStatusValue(properties);
     const statusBucket = mapStatusBucket(statusValue);
     const deadlineRaw = getDeadlineValue(properties);
-    const deadlineDate = parseNotionDate(deadlineRaw);
+    const deadlineDate = parseNotionDate(deadlineRaw, { preferEnd: true });
+    const deadlineIsDateTime = isDateTimeValue(deadlineRaw, { preferEnd: true });
 
-    const overdue = isOverdue(deadlineRaw, deadlineDate, statusBucket, now, nowDateOnly);
-    const dueInOneDay = isDueInOneDay(deadlineRaw, deadlineDate, statusBucket, now, nowDateOnly);
+    const overdue = isOverdue(deadlineRaw, deadlineDate, statusBucket, now, nowDateOnly, deadlineIsDateTime);
+    const dueInOneDay = isDueInOneDay(
+      deadlineRaw,
+      deadlineDate,
+      statusBucket,
+      now,
+      nowDateOnly,
+      deadlineIsDateTime
+    );
     if (!overdue && !dueInOneDay) {
       continue;
     }
@@ -818,6 +879,7 @@ function createChangeEmbed(cardName, cardUrl, changes, cardData, departmentRoleM
 
   embed.setDescription(summaryLines.join('\n'));
   addCommonFields(embed, cardData, departmentRoleMentions);
+  addCrudAuditField(embed, cardData, 'Update');
   addSupportFooter(embed);
 
   return embed;
@@ -832,6 +894,7 @@ function createCreatedEmbed(cardName, cardUrl, cardData, departmentRoleMentions 
     .setTimestamp();
 
   addCommonFields(embed, cardData, departmentRoleMentions);
+  addCrudAuditField(embed, cardData, 'Create');
   addSupportFooter(embed);
 
   return embed;
@@ -891,6 +954,7 @@ function createCompletedEmbed(cardName, cardUrl, cardData, departmentRoleMention
     .setTimestamp();
 
   addCommonFields(embed, cardData, departmentRoleMentions);
+  addCrudAuditField(embed, cardData, 'Update');
   addSupportFooter(embed);
 
   return embed;
@@ -905,6 +969,7 @@ function createRemovedEmbed(cardName, cardUrl, cardData, departmentRoleMentions 
     .setTimestamp();
 
   addCommonFields(embed, cardData, departmentRoleMentions);
+  addCrudAuditField(embed, cardData, 'Delete');
   addSupportFooter(embed);
 
   return embed;

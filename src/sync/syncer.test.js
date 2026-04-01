@@ -7,6 +7,7 @@ import {
   createCalendarOverviewEmbed,
   hasRequiredTaskDetails,
   getCompletedCards,
+  createCreatedEmbeds,
   createCompletedEmbeds,
 } from './syncer.js';
 
@@ -144,8 +145,8 @@ test('createDeadlineReminderEmbeds does not remind when task is done variant', (
   assert.equal(result.embeds.length, 0);
 });
 
-test('createDeadlineReminderEmbeds shows end date when Date is a range', () => {
-  const now = new Date(2026, 2, 28, 10, 0, 0);
+test('createDeadlineReminderEmbeds uses end date of a range for reminder timing', () => {
+  const now = new Date(2026, 2, 29, 10, 0, 0);
   const cards = [
     makeCard('range-1', 'In Progress', '2026-03-29 → 2026-03-30', 'Operations'),
   ];
@@ -156,9 +157,24 @@ test('createDeadlineReminderEmbeds shows end date when Date is a range', () => {
 
   const result = createDeadlineReminderEmbeds(cards, departmentRoleMentions, {}, now);
   assert.equal(result.embeds.length, 1);
+  assert.match(result.embeds[0].data.description, /due in 1 day/i);
 
   const dateField = result.embeds[0].data.fields.find(field => field.name === '📅 Date');
   assert.equal(dateField.value, '29-03-2026 → 30-03-2026');
+});
+
+test('createDeadlineReminderEmbeds does not remind early for range where end date is far away', () => {
+  const now = new Date(2026, 2, 31, 10, 0, 0);
+  const cards = [
+    makeCard('range-future', 'Not Started', '2026-03-31 → 2026-04-16', 'Operations'),
+  ];
+
+  const departmentRoleMentions = {
+    operations: '<@&1234567890>',
+  };
+
+  const result = createDeadlineReminderEmbeds(cards, departmentRoleMentions, {}, now);
+  assert.equal(result.embeds.length, 0);
 });
 
 test('createCalendarOverviewEmbed returns week tasks with DD-MM-YYYY dates', () => {
@@ -263,4 +279,28 @@ test('createCompletedEmbeds creates finished-task embed', () => {
   assert.equal(embeds.length, 1);
   assert.match(embeds[0].data.title, /Task 1/i);
   assert.match(embeds[0].data.description, /status changed to done/i);
+});
+
+test('createCreatedEmbeds includes CRUD actor metadata when available', () => {
+  const cards = [
+    {
+      ...makeCard('meta-1', 'Not Started', '2026-03-24', 'Operations'),
+      meta: {
+        source: 'Notion',
+        createdTime: '2026-03-24T10:00:00.000Z',
+        createdBy: {
+          id: '12345678-90ab-cdef-1234-567890abcdef',
+          name: 'Tester',
+        },
+      },
+    },
+  ];
+
+  const embeds = createCreatedEmbeds(cards, { operations: '<@&1234567890>' });
+  const crudField = embeds[0].data.fields.find(field => field.name === '🧾 CRUD Log');
+
+  assert.ok(crudField);
+  assert.match(crudField.value, /Action: Create/i);
+  assert.match(crudField.value, /Source: Notion/i);
+  assert.match(crudField.value, /Actor: Tester/i);
 });

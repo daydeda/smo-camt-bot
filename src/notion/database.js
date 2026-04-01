@@ -14,6 +14,7 @@ const DEFAULT_ORGANIZATION = 'SMO CAMT';
 
 let databaseSchemaCache = null;
 let databaseSchemaFetchedAt = 0;
+const relationTitlePersistentCache = new Map();
 
 /**
  * Extracts text value from Notion rich text array
@@ -47,6 +48,34 @@ function extractPageTitleFromProperties(properties) {
   }
 
   return null;
+}
+
+function toNotionActorMeta(user) {
+  if (!user || typeof user !== 'object') {
+    return null;
+  }
+
+  const id = typeof user.id === 'string' && user.id.trim().length > 0
+    ? user.id
+    : null;
+  const name = typeof user.name === 'string' && user.name.trim().length > 0
+    ? user.name.trim()
+    : null;
+  const email = typeof user.person?.email === 'string' && user.person.email.trim().length > 0
+    ? user.person.email.trim()
+    : null;
+  const actorType = typeof user.type === 'string' && user.type.trim().length > 0
+    ? user.type.trim()
+    : null;
+
+  const fallbackId = id ? id.replace(/-/g, '').slice(0, 8) : null;
+  const displayName = name || email || (fallbackId ? `Unknown (${fallbackId})` : 'Unknown');
+
+  return {
+    id,
+    name: displayName,
+    type: actorType,
+  };
 }
 
 function toHyphenatedPageId(compactPageId) {
@@ -744,8 +773,16 @@ async function getPageTitle(pageId, titleCache) {
     const page = await notion.pages.retrieve({ page_id: pageId });
     const title = extractPageTitleFromProperties(page.properties) || `Untitled (${pageId.slice(0, 8)})`;
     titleCache.set(pageId, title);
+    relationTitlePersistentCache.set(pageId, title);
     return title;
   } catch (error) {
+    if (relationTitlePersistentCache.has(pageId)) {
+      const cachedTitle = relationTitlePersistentCache.get(pageId);
+      titleCache.set(pageId, cachedTitle);
+      console.warn(`⚠️  Failed to resolve relation title for ${pageId}: ${error.message}. Using cached title.`);
+      return cachedTitle;
+    }
+
     const fallbackTitle = `Unknown (${pageId.slice(0, 8)})`;
     titleCache.set(pageId, fallbackTitle);
     console.warn(`⚠️  Failed to resolve relation title for ${pageId}: ${error.message}`);
@@ -771,6 +808,13 @@ async function extractPageData(page, relationTitleCache = new Map()) {
   const cardData = {
     id: page.id,
     url: page.url,
+    meta: {
+      source: 'Notion',
+      createdTime: page.created_time || null,
+      lastEditedTime: page.last_edited_time || null,
+      createdBy: toNotionActorMeta(page.created_by),
+      lastEditedBy: toNotionActorMeta(page.last_edited_by),
+    },
     properties: {},
   };
 
@@ -893,6 +937,7 @@ export function formatCardForTracking(card) {
     id: card.id,
     url: card.url,
     timestamp: new Date().toISOString(),
+    meta: card.meta || null,
     properties: properties,
   };
 

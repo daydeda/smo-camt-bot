@@ -2,6 +2,7 @@ import discordClient from './discord/bot.js';
 import { ApplicationCommandOptionType, EmbedBuilder, MessageFlags, PermissionFlagsBits } from 'discord.js';
 import fs from 'fs';
 import path from 'path';
+import { createHash } from 'crypto';
 import { waitForDiscordClientReady } from './discord/compat.js';
 import {
   fetchDatabaseCards,
@@ -32,6 +33,12 @@ const AUTOCOMPLETE_LIMIT = 25;
 const TASK_VIEW_DEFAULT_LIMIT = 15;
 const TASK_VIEW_MAX_LIMIT = 50;
 const TASK_VIEW_PAGE_SIZE = 8;
+const HARD_DEDUPE_META_KEY = 'hardDedupeHistoryByKey';
+const HARD_DEDUPE_HYDRATION_META_KEY = 'hardDedupeHydratedAtByChannelId';
+const HARD_DEDUPE_TTL_MS = 45 * 24 * 60 * 60 * 1000;
+const HARD_DEDUPE_MAX_KEYS = 5000;
+const HARD_DEDUPE_DISCORD_HISTORY_FETCH_LIMIT = 250;
+const HARD_DEDUPE_HYDRATION_INTERVAL_MS = 5 * 60 * 1000;
 
 function isProcessAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) {
@@ -328,6 +335,301 @@ async function safeCommandFailureReply(interaction, message) {
 function getMonthKey(date) {
   const month = String(date.getMonth() + 1).padStart(2, '0');
   return `${date.getFullYear()}-${month}`;
+}
+
+function sanitizeEmbedForHardDedupe(embed) {
+  const data = embed?.data && typeof embed.data === 'object'
+    ? embed.data
+    : (embed && typeof embed === 'object' ? embed : {});
+  const fields = Array.isArray(data.fields)
+    ? data.fields.map(field => ({
+      name: typeof field?.name === 'string' ? field.name : '',
+      value: typeof field?.value === 'string' ? field.value : '',
+      inline: Boolean(field?.inline),
+    }))
+    : [];
+
+  return {
+    title: typeof data.title === 'string' ? data.title : '',
+    url: typeof data.url === 'string' ? data.url : '',
+    description: typeof data.description === 'string' ? data.description : '',
+    color: Number.isInteger(data.color) ? data.color : null,
+    author: typeof data.author?.name === 'string' ? data.author.name : '',
+    footer: typeof data.footer?.text === 'string' ? data.footer.text : '',
+    fields,
+  };
+}
+
+function buildHardDedupeKey({ channelId, messageType, scopeToken = '', embed }) {
+  const payload = {
+    channelId: String(channelId || ''),
+    messageType: String(messageType || ''),
+    scopeToken: String(scopeToken || ''),
+    embed: sanitizeEmbedForHardDedupe(embed),
+  };
+
+  return createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+}
+
+function pruneHardDedupeHistory(rawHistory, nowMs = Date.now()) {
+  const history = rawHistory && typeof rawHistory === 'object' ? rawHistory : {};
+  const validEntries = [];
+
+  for (const [key, value] of Object.entries(history)) {
+    if (typeof key !== 'string' || typeof value !== 'string') {
+      continue;
+    }
+
+    const timestampMs = Date.parse(value);
+    if (Number.isNaN(timestampMs)) {
+      continue;
+    }
+
+    if ((nowMs - timestampMs) > HARD_DEDUPE_TTL_MS) {
+      continue;
+    }
+
+    validEntries.push([key, value]);
+  }
+
+  validEntries.sort((left, right) => Date.parse(right[1]) - Date.parse(left[1]));
+
+  return Object.fromEntries(validEntries.slice(0, HARD_DEDUPE_MAX_KEYS));
+}
+
+function applyHardDedupeToEmbeds(
+  embeds,
+  {
+    channelId,
+    messageType,
+    scopeToken = '',
+    dedupeHistoryByKey = {},
+  } = {}
+) {
+  const acceptedEmbeds = [];
+  const acceptedKeys = [];
+  let skippedCount = 0;
+
+  for (const embed of embeds) {
+    const dedupeKey = buildHardDedupeKey({
+      channelId,
+      messageType,
+      scopeToken,
+      embed,
+    });
+
+    if (Object.hasOwn(dedupeHistoryByKey, dedupeKey)) {
+      skippedCount += 1;
+      continue;
+    }
+
+    acceptedEmbeds.push(embed);
+    acceptedKeys.push(dedupeKey);
+  }
+
+  return {
+    embeds: acceptedEmbeds,
+    keys: acceptedKeys,
+    skippedCount,
+  };
+}
+
+function markHardDedupeKeys(dedupeHistoryByKey, keys = [], timestampIso = new Date().toISOString()) {
+  let changed = false;
+
+  for (const key of keys) {
+    if (typeof key !== 'string' || key.length === 0) {
+      continue;
+    }
+
+    if (Object.hasOwn(dedupeHistoryByKey, key)) {
+      continue;
+    }
+
+    dedupeHistoryByKey[key] = timestampIso;
+    changed = true;
+  }
+
+  return changed;
+}
+
+function inferMessageTypeFromEmbed(embed) {
+  const data = embed?.data && typeof embed.data === 'object'
+    ? embed.data
+    : (embed && typeof embed === 'object' ? embed : {});
+  const title = typeof data.title === 'string' ? data.title : '';
+  const description = typeof data.description === 'string' ? data.description : '';
+
+  if (title.startsWith('⏰ Deadline Reminder:')) {
+    return 'reminder';
+  }
+
+  if (title.startsWith('🆕 ')) {
+    return 'created';
+  }
+
+  if (title.startsWith('📋 ')) {
+    return 'changed';
+  }
+
+  if (title.startsWith('🗑️ ') || title.startsWith('🗑 ')) {
+    return 'removed';
+  }
+
+  if (description.includes('New card created in Notion database')) {
+    return 'created';
+  }
+
+  if (description.includes('Card removed from Notion database')) {
+    return 'removed';
+  }
+
+  return null;
+}
+
+function shouldHydrateHardDedupeForChannel(channelId, hydrationMetaByChannelId, nowMs = Date.now()) {
+  const rawTimestamp = hydrationMetaByChannelId?.[channelId];
+  if (typeof rawTimestamp !== 'string') {
+    return true;
+  }
+
+  const lastHydratedAtMs = Date.parse(rawTimestamp);
+  if (Number.isNaN(lastHydratedAtMs)) {
+    return true;
+  }
+
+  return (nowMs - lastHydratedAtMs) >= HARD_DEDUPE_HYDRATION_INTERVAL_MS;
+}
+
+async function hydrateHardDedupeHistoryFromDiscord(
+  channel,
+  dedupeHistoryByKey,
+  { now = new Date() } = {}
+) {
+  if (!channel || !channel.id || typeof channel.messages?.fetch !== 'function') {
+    return { added: 0, scannedMessages: 0, scannedEmbeds: 0 };
+  }
+
+  const botUserId = discordClient?.user?.id;
+  if (!botUserId) {
+    return { added: 0, scannedMessages: 0, scannedEmbeds: 0 };
+  }
+
+  let scannedMessages = 0;
+  let scannedEmbeds = 0;
+  let added = 0;
+  const timestampIso = now.toISOString();
+
+  try {
+    const messages = await channel.messages.fetch({
+      limit: HARD_DEDUPE_DISCORD_HISTORY_FETCH_LIMIT,
+    });
+
+    for (const message of messages.values()) {
+      if (message?.author?.id !== botUserId) {
+        continue;
+      }
+
+      scannedMessages += 1;
+      const embeds = Array.isArray(message.embeds) ? message.embeds : [];
+      if (embeds.length === 0) {
+        continue;
+      }
+
+      for (const embed of embeds) {
+        scannedEmbeds += 1;
+        const messageType = inferMessageTypeFromEmbed(embed);
+        if (!messageType) {
+          continue;
+        }
+
+        const reminderScopeToken = messageType === 'reminder'
+          ? formatDateKey(new Date(message.createdTimestamp || now.getTime()))
+          : '';
+        const dedupeKey = buildHardDedupeKey({
+          channelId: channel.id,
+          messageType,
+          scopeToken: reminderScopeToken,
+          embed,
+        });
+
+        if (Object.hasOwn(dedupeHistoryByKey, dedupeKey)) {
+          continue;
+        }
+
+        dedupeHistoryByKey[dedupeKey] = timestampIso;
+        added += 1;
+      }
+    }
+  } catch (error) {
+    console.warn(
+      `⚠️  Failed to hydrate hard dedupe history from channel ${channel.id}: ${error.message}`
+    );
+  }
+
+  return { added, scannedMessages, scannedEmbeds };
+}
+
+function getInteractionActorText(interaction) {
+  const actorId = interaction?.user?.id || 'unknown';
+  const actorTag = interaction?.user?.tag || interaction?.user?.username || 'unknown';
+  return `<@${actorId}> (${actorTag})`;
+}
+
+function createDiscordCrudAuditEmbed({ action, interaction, card = null, details = [] } = {}) {
+  const actionText = typeof action === 'string' ? action.toUpperCase() : 'UNKNOWN';
+  const colorByAction = {
+    CREATE: 0x2ECC71,
+    READ: 0x3498DB,
+    UPDATE: 0xF39C12,
+    DELETE: 0xE74C3C,
+  };
+
+  const titleByAction = {
+    CREATE: '🧾 Discord CRUD: CREATE',
+    READ: '🧾 Discord CRUD: READ',
+    UPDATE: '🧾 Discord CRUD: UPDATE',
+    DELETE: '🧾 Discord CRUD: DELETE',
+  };
+
+  const taskTitle = card ? getTaskTitle(card) : 'N/A';
+  const taskId = card?.id || 'N/A';
+  const taskUrl = card?.url || 'N/A';
+  const detailLines = Array.isArray(details)
+    ? details.map(item => String(item).trim()).filter(Boolean)
+    : [];
+
+  const embed = new EmbedBuilder()
+    .setTitle(titleByAction[actionText] || '🧾 Discord CRUD')
+    .setColor(colorByAction[actionText] || 0x5865F2)
+    .setTimestamp(new Date())
+    .addFields(
+      { name: 'Source', value: 'Discord Slash Command', inline: true },
+      { name: 'Action', value: actionText, inline: true },
+      { name: 'Actor', value: getInteractionActorText(interaction), inline: false },
+      { name: 'Task', value: truncateText(taskTitle, 256) || 'N/A', inline: false },
+      { name: 'Task ID', value: taskId, inline: true },
+      { name: 'Task URL', value: taskUrl, inline: true }
+    );
+
+  if (detailLines.length > 0) {
+    embed.setDescription(detailLines.join('\n'));
+  }
+
+  return embed;
+}
+
+async function postDiscordCrudAudit(channel, payload) {
+  if (!channel || typeof channel.send !== 'function') {
+    return;
+  }
+
+  try {
+    const embed = createDiscordCrudAuditEmbed(payload);
+    await channel.send({ embeds: [embed] });
+  } catch (error) {
+    console.error(`⚠️  Failed to post Discord CRUD audit embed: ${error.message}`);
+  }
 }
 
 function isAdminInteraction(interaction) {
@@ -1332,6 +1634,15 @@ function registerCommandHandlers() {
           });
 
           await syncNotionToDiscord();
+          await postDiscordCrudAudit(commandChannel, {
+            action: 'CREATE',
+            interaction,
+            card: createdCard,
+            details: [
+              `Department: ${formatScalarReplyValue(createdCard?.properties?.Department)}`,
+              `Date: ${formatScalarReplyValue(createdCard?.properties?.Date)}`,
+            ],
+          });
           const instanceMarker = `instance:${process.pid} db:${String(config.notion.databaseId).slice(0, 8)}`;
           await interaction.editReply(
             `Task created and sync triggered (${instanceMarker}).\n\n${formatTaskReply(createdCard, 'Created')}`
@@ -1350,6 +1661,11 @@ function registerCommandHandlers() {
           const card = await resolveDatabaseCardReference({
             pageIdOrUrl,
             title: taskTitle,
+          });
+          await postDiscordCrudAudit(commandChannel, {
+            action: 'READ',
+            interaction,
+            card,
           });
           await interaction.editReply(formatTaskReply(card, 'Task'));
         }
@@ -1439,6 +1755,15 @@ function registerCommandHandlers() {
 
           const updatedCard = await updateDatabaseCard(resolvedCard.id, updates);
           await syncNotionToDiscord();
+          await postDiscordCrudAudit(commandChannel, {
+            action: 'UPDATE',
+            interaction,
+            card: updatedCard,
+            details: [
+              `Updated fields: ${Object.keys(updates).join(', ')}`,
+              `Status: ${formatScalarReplyValue(resolvedCard?.properties?.Status)} -> ${formatScalarReplyValue(updatedCard?.properties?.Status)}`,
+            ],
+          });
           await interaction.editReply(`Task updated and sync triggered.\n\n${formatTaskReply(updatedCard, 'Updated')}`);
         }
 
@@ -1462,6 +1787,14 @@ function registerCommandHandlers() {
           });
 
           await syncNotionToDiscord();
+          await postDiscordCrudAudit(commandChannel, {
+            action: 'UPDATE',
+            interaction,
+            card: movedCard,
+            details: [
+              `Status move: ${formatScalarReplyValue(resolvedCard?.properties?.Status)} -> ${targetStatus}`,
+            ],
+          });
           await interaction.editReply(`Task moved to **${targetStatus}** and sync triggered.\n\n${formatTaskReply(movedCard, 'Moved')}`);
         }
 
@@ -1481,6 +1814,14 @@ function registerCommandHandlers() {
 
           const archivedCard = await archiveDatabaseCard(resolvedCard.id);
           await syncNotionToDiscord();
+          await postDiscordCrudAudit(commandChannel, {
+            action: 'DELETE',
+            interaction,
+            card: resolvedCard,
+            details: [
+              `Archived in Notion: ${archivedCard.archived ? 'Yes' : 'No'}`,
+            ],
+          });
           await interaction.editReply(
             [
               'Task archived in Notion and sync triggered.',
@@ -1602,7 +1943,18 @@ async function syncNotionToDiscord() {
     }
 
     const now = new Date();
+    const todayKey = now.toISOString().slice(0, 10);
     const reminderStateByCardId = stateTracker.getMeta('deadlineReminderByCardId', {});
+    const rawHardDedupeHistoryByKey = stateTracker.getMeta(HARD_DEDUPE_META_KEY, {});
+    const hardDedupeHistoryByKey = pruneHardDedupeHistory(rawHardDedupeHistoryByKey, now.getTime());
+    const rawHardDedupeHydrationMetaByChannelId = stateTracker.getMeta(HARD_DEDUPE_HYDRATION_META_KEY, {});
+    const hardDedupeHydrationMetaByChannelId =
+      rawHardDedupeHydrationMetaByChannelId && typeof rawHardDedupeHydrationMetaByChannelId === 'object'
+        ? { ...rawHardDedupeHydrationMetaByChannelId }
+        : {};
+    let hardDedupeMetaChanged =
+      JSON.stringify(rawHardDedupeHistoryByKey || {}) !== JSON.stringify(hardDedupeHistoryByKey);
+    let hardDedupeHydrationMetaChanged = false;
 
     if (
       readyCreatedCards.length > 0 ||
@@ -1622,6 +1974,21 @@ async function syncNotionToDiscord() {
 
       const channelResults = [];
       for (const channel of channels) {
+        if (shouldHydrateHardDedupeForChannel(channel.id, hardDedupeHydrationMetaByChannelId, now.getTime())) {
+          const hydrationResult = await hydrateHardDedupeHistoryFromDiscord(channel, hardDedupeHistoryByKey, {
+            now,
+          });
+          hardDedupeHydrationMetaByChannelId[channel.id] = now.toISOString();
+          hardDedupeHydrationMetaChanged = true;
+
+          if (hydrationResult.added > 0) {
+            hardDedupeMetaChanged = true;
+            console.log(
+              `🔄 Hydrated ${hydrationResult.added} dedupe key(s) from channel ${channel.id} (messages=${hydrationResult.scannedMessages}, embeds=${hydrationResult.scannedEmbeds})`
+            );
+          }
+        }
+
         const channelTrackedCards = filterCardsForChannel(trackedCards, channel.id);
         const channelReadyCreatedCards = filterCardsForChannel(readyCreatedCards, channel.id);
         const channelNotifiableChangedCards = filterCardsForChannel(notifiableChangedCards, channel.id);
@@ -1636,11 +2003,52 @@ async function syncNotionToDiscord() {
         const createdEmbeds = createCreatedEmbeds(channelReadyCreatedCards, departmentRoleMentions);
         const changedEmbeds = createChangeEmbeds(channelNotifiableChangedCards, departmentRoleMentions);
         const removedEmbeds = createRemovedEmbeds(channelTrackedDeletedCards, departmentRoleMentions);
-        const embeds = [...reminderResult.embeds, ...createdEmbeds, ...changedEmbeds, ...removedEmbeds];
+        const dedupedReminders = applyHardDedupeToEmbeds(reminderResult.embeds, {
+          channelId: channel.id,
+          messageType: 'reminder',
+          scopeToken: todayKey,
+          dedupeHistoryByKey: hardDedupeHistoryByKey,
+        });
+        const dedupedCreated = applyHardDedupeToEmbeds(createdEmbeds, {
+          channelId: channel.id,
+          messageType: 'created',
+          dedupeHistoryByKey: hardDedupeHistoryByKey,
+        });
+        const dedupedChanged = applyHardDedupeToEmbeds(changedEmbeds, {
+          channelId: channel.id,
+          messageType: 'changed',
+          dedupeHistoryByKey: hardDedupeHistoryByKey,
+        });
+        const dedupedRemoved = applyHardDedupeToEmbeds(removedEmbeds, {
+          channelId: channel.id,
+          messageType: 'removed',
+          dedupeHistoryByKey: hardDedupeHistoryByKey,
+        });
+
+        const embeds = [
+          ...dedupedReminders.embeds,
+          ...dedupedCreated.embeds,
+          ...dedupedChanged.embeds,
+          ...dedupedRemoved.embeds,
+        ];
+        const dedupeKeys = [
+          ...dedupedReminders.keys,
+          ...dedupedCreated.keys,
+          ...dedupedChanged.keys,
+          ...dedupedRemoved.keys,
+        ];
+        const skippedByHardDedupe =
+          dedupedReminders.skippedCount +
+          dedupedCreated.skippedCount +
+          dedupedChanged.skippedCount +
+          dedupedRemoved.skippedCount;
 
         channelResults.push({
           channel,
           embeds,
+          dedupeKeys,
+          skippedByHardDedupe,
+          sentReminderCount: dedupedReminders.embeds.length,
           reminderResult,
           channelReadyCreatedCards,
         });
@@ -1657,7 +2065,15 @@ async function syncNotionToDiscord() {
           }
 
           await sendEmbedsToChannel(result.channel, result.embeds);
+          if (markHardDedupeKeys(hardDedupeHistoryByKey, result.dedupeKeys, now.toISOString())) {
+            hardDedupeMetaChanged = true;
+          }
         }
+
+        const totalHardDedupeSkips = channelResults.reduce(
+          (sum, result) => sum + result.skippedByHardDedupe,
+          0
+        );
 
         const notifiedCreatedCardIdSet = new Set();
         for (const result of channelResults) {
@@ -1675,13 +2091,24 @@ async function syncNotionToDiscord() {
         }
 
         const totalReminderCount = channelResults.reduce(
-          (sum, result) => sum + result.reminderResult.embeds.length,
+          (sum, result) => sum + result.sentReminderCount,
           0
         );
 
         console.log(
-          `✅ Posted updates to ${channels.length} channel(s) (reminders=${totalReminderCount})`
+          `✅ Posted updates to ${channels.length} channel(s) (reminders=${totalReminderCount}, hardDedupeSkipped=${totalHardDedupeSkips})`
         );
+      }
+
+      if (!hasAnyEmbeds) {
+        const totalHardDedupeSkips = channelResults.reduce(
+          (sum, result) => sum + result.skippedByHardDedupe,
+          0
+        );
+
+        if (totalHardDedupeSkips > 0) {
+          console.log(`🔁 Hard dedupe suppressed ${totalHardDedupeSkips} duplicate embed(s).`);
+        }
       }
 
       let mergedReminderStateByCardId = { ...reminderStateByCardId };
@@ -1693,6 +2120,12 @@ async function syncNotionToDiscord() {
       }
 
       stateTracker.setMeta('deadlineReminderByCardId', mergedReminderStateByCardId);
+      if (hardDedupeMetaChanged) {
+        stateTracker.setMeta(HARD_DEDUPE_META_KEY, hardDedupeHistoryByKey);
+      }
+      if (hardDedupeHydrationMetaChanged) {
+        stateTracker.setMeta(HARD_DEDUPE_HYDRATION_META_KEY, hardDedupeHydrationMetaByChannelId);
+      }
 
       const currentMonthKey = getMonthKey(now);
       const lastMonthlyOverviewKey = stateTracker.getMeta('monthlyOverviewLastSentKey', null);
