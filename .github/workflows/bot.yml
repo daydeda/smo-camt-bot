@@ -107,7 +107,9 @@ jobs:
 
             IFS=',' read -r -a FILTER_ENTRIES <<< "$FILTERS_RAW"
             for entry in "${FILTER_ENTRIES[@]}"; do
-              entry="$(echo "$entry" | xargs)"
+              # Trim leading and trailing whitespace using bash-native methods (safer than xargs with quotes)
+              entry="${entry#"${entry%%[![:space:]]*}"}"
+              entry="${entry%"${entry##*[![:space:]]}"}"
               if [ -z "$entry" ]; then
                 continue
               fi
