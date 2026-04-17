@@ -1,4 +1,5 @@
 import { EmbedBuilder } from 'discord.js';
+import config from '../config.js';
 
 const DATE_ONLY_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 const DATETIME_REGEX = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
@@ -106,7 +107,34 @@ function formatDateTimeText(value) {
   }
 
   if (DATETIME_REGEX.test(normalizedValue)) {
-    return `${normalizedValue.slice(8, 10)}-${normalizedValue.slice(5, 7)}-${normalizedValue.slice(0, 4)} ${normalizedValue.slice(11, 16)}`;
+    const date = new Date(normalizedValue);
+    if (Number.isNaN(date.getTime())) {
+      return null;
+    }
+
+    try {
+      const timezone = config?.notion?.timezone || 'Asia/Bangkok';
+      const formatter = new Intl.DateTimeFormat('en-GB', {
+        timeZone: timezone,
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        hour12: false,
+      });
+
+      const parts = formatter.formatToParts(date);
+      const p = {};
+      for (const { type, value: partValue } of parts) {
+        p[type] = partValue;
+      }
+
+      return `${p.day}-${p.month}-${p.year} ${p.hour}:${p.minute}`;
+    } catch (error) {
+      // Fallback to UTC slice if Intl fails or timezone is invalid
+      return `${normalizedValue.slice(8, 10)}-${normalizedValue.slice(5, 7)}-${normalizedValue.slice(0, 4)} ${normalizedValue.slice(11, 16)}`;
+    }
   }
 
   return null;
@@ -332,6 +360,11 @@ function formatActorDisplay(actorMeta) {
     : null;
 
   if (!actorId) {
+    return actorName;
+  }
+
+  // Avoid repeating the ID if it's already in the display name
+  if (actorName.includes(`(${actorId})`)) {
     return actorName;
   }
 
