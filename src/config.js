@@ -80,7 +80,7 @@ function parseChannelDepartmentFilters(rawValue) {
       departmentsRaw.toLowerCase() === 'all';
     const departments = isAllDepartments
       ? []
-      : parseScopeList(departmentsRaw, '|');
+      : parseScopeList(departmentsRaw, ';;');
 
     if (departments.length === 0) {
       mapping[channelId] = [];
