@@ -12,6 +12,22 @@ const DATABASE_SCHEMA_CACHE_TTL_MS = 5 * 60 * 1000;
 const AUTOCOMPLETE_MAX_CHOICES = 25;
 const DEFAULT_ORGANIZATION = 'SMO CAMT';
 
+function getDepartmentValues(properties = {}) {
+  const departmentValue = properties?.Department;
+
+  if (Array.isArray(departmentValue)) {
+    return departmentValue
+      .map(item => String(item).trim())
+      .filter(Boolean);
+  }
+
+  if (typeof departmentValue === 'string') {
+    return [departmentValue.trim()];
+  }
+
+  return [];
+}
+
 let databaseSchemaCache = null;
 let databaseSchemaFetchedAt = 0;
 const relationTitlePersistentCache = new Map();
@@ -1070,7 +1086,7 @@ export async function archiveDatabaseCard(pageIdOrUrl) {
   };
 }
 
-export async function resolveDatabaseCardReference({ pageIdOrUrl, title } = {}) {
+export async function resolveDatabaseCardReference({ pageIdOrUrl, title, filterDepartments = [] } = {}) {
   const rawIdOrUrl = typeof pageIdOrUrl === 'string' ? pageIdOrUrl.trim() : '';
   const rawTitle = typeof title === 'string' ? title.trim() : '';
 
@@ -1088,10 +1104,19 @@ export async function resolveDatabaseCardReference({ pageIdOrUrl, title } = {}) 
 
   const cards = await fetchDatabaseCards();
   const normalizedRequestedTitle = normalizeLookupText(rawTitle);
-  const exactMatches = cards.filter(card => {
+  const initialMatches = cards.filter(card => {
     const cardTitle = getCardTitleFromProperties(card.properties || {}, titlePropertyName);
     return normalizeLookupText(cardTitle) === normalizedRequestedTitle;
   });
+
+  let exactMatches = initialMatches;
+  if (initialMatches.length > 1 && filterDepartments.length > 0) {
+    const normalizedFilterDepts = new Set(filterDepartments.map(d => normalizeLookupText(d)));
+    exactMatches = initialMatches.filter(card => {
+      const cardDepts = getDepartmentValues(card.properties || []);
+      return cardDepts.some(d => normalizedFilterDepts.has(normalizeLookupText(d)));
+    });
+  }
 
   if (exactMatches.length === 1) {
     return exactMatches[0];
@@ -1099,8 +1124,9 @@ export async function resolveDatabaseCardReference({ pageIdOrUrl, title } = {}) 
 
   if (exactMatches.length > 1) {
     const sampleIds = exactMatches.slice(0, 5).map(card => card.id).join(', ');
+    const contextInfo = filterDepartments.length > 0 ? ` (filtered for your department(s))` : '';
     throw new Error(
-      `Multiple tasks matched title "${rawTitle}" (${exactMatches.length} found). Use id/url. Sample IDs: ${sampleIds}`
+      `Multiple tasks matched title "${rawTitle}"${contextInfo} (${exactMatches.length} found). Use id/url. Sample IDs: ${sampleIds}`
     );
   }
 

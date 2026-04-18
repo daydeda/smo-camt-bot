@@ -766,6 +766,10 @@ function formatTaskReply(card, titlePrefix = 'Task') {
   ].join('\n');
 }
 
+function getDepartmentsForChannel(channelId) {
+  return config.sync.channelDepartmentsByChannelId[channelId] || [];
+}
+
 function parseCommaSeparatedLookupValues(rawValue) {
   if (typeof rawValue !== 'string') {
     return [];
@@ -1660,6 +1664,7 @@ function registerCommandHandlers() {
           const card = await resolveDatabaseCardReference({
             pageIdOrUrl,
             title: taskTitle,
+            filterDepartments: getDepartmentsForChannel(interaction.channelId),
           });
           await postDiscordCrudAudit(commandChannel, {
             action: 'READ',
@@ -1732,6 +1737,7 @@ function registerCommandHandlers() {
           const resolvedCard = await resolveDatabaseCardReference({
             pageIdOrUrl,
             title: taskTitle,
+            filterDepartments: getDepartmentsForChannel(interaction.channelId),
           });
           const updates = getTaskUpdatePayloadFromInteraction(interaction);
 
@@ -1779,6 +1785,7 @@ function registerCommandHandlers() {
           const resolvedCard = await resolveDatabaseCardReference({
             pageIdOrUrl,
             title: taskTitle,
+            filterDepartments: getDepartmentsForChannel(interaction.channelId),
           });
 
           const movedCard = await updateDatabaseCard(resolvedCard.id, {
@@ -1809,6 +1816,7 @@ function registerCommandHandlers() {
           const resolvedCard = await resolveDatabaseCardReference({
             pageIdOrUrl,
             title: taskTitle,
+            filterDepartments: getDepartmentsForChannel(interaction.channelId),
           });
 
           const archivedCard = await archiveDatabaseCard(resolvedCard.id);
