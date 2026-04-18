@@ -2,6 +2,8 @@ name: Run Notion-Discord SMO-CAMT Bot
 
 on:
   workflow_dispatch:
+  push:
+    branches: [ main ]
   schedule:
     # Re-run every 6 hours. Each run keeps the bot alive for ~5h50m.
     - cron: "0 */6 * * *"
@@ -15,7 +17,7 @@ env:
 
 concurrency:
   group: notion-discord-bot
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   run-bot:

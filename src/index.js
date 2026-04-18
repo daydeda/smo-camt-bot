@@ -1307,7 +1307,7 @@ async function registerSlashCommands(channel) {
             {
               type: ApplicationCommandOptionType.String,
               name: 'start_date',
-              description: 'Start date: DD/MM/YYYY',
+              description: 'Start date: DD/MM/YYYY [AD Only]',
               required: true,
               autocomplete: true,
             },
@@ -1321,7 +1321,7 @@ async function registerSlashCommands(channel) {
             {
               type: ApplicationCommandOptionType.String,
               name: 'end_date',
-              description: 'End date: DD/MM/YYYY (optional)',
+              description: 'End date: DD/MM/YYYY [AD Only] (optional)',
               required: false,
               autocomplete: true,
             },
@@ -1436,14 +1436,14 @@ async function registerSlashCommands(channel) {
             {
               type: ApplicationCommandOptionType.String,
               name: 'start_date',
-              description: 'New start date: DD/MM/YYYY',
+              description: 'New start date: DD/MM/YYYY [AD Only]',
               required: false,
               autocomplete: true,
             },
             {
               type: ApplicationCommandOptionType.String,
               name: 'end_date',
-              description: 'New end date: DD/MM/YYYY',
+              description: 'New end date: DD/MM/YYYY [AD Only]',
               required: false,
               autocomplete: true,
             },
