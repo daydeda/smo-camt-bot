@@ -981,7 +981,6 @@ function buildDateAutocompleteChoices(focusedValue = '') {
     candidates.push(formatted);
   }
 
-  candidates.push('01/01/0044 BC', '15/03/0044 BC');
 
   const seen = new Set();
   return candidates
