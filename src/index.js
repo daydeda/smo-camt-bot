@@ -978,7 +978,7 @@ function buildDateAutocompleteChoices(focusedValue = '') {
   for (let offset = 0; offset <= 14; offset += 1) {
     const date = new Date(now.getFullYear(), now.getMonth(), now.getDate() + offset);
     const formatted = formatDateForAutocomplete(date);
-    candidates.push(formatted, `${formatted} AD`);
+    candidates.push(formatted);
   }
 
   candidates.push('01/01/0044 BC', '15/03/0044 BC');
@@ -1307,7 +1307,7 @@ async function registerSlashCommands(channel) {
             {
               type: ApplicationCommandOptionType.String,
               name: 'start_date',
-              description: 'Start date: DD/MM/YYYY [AD|BC]',
+              description: 'Start date: DD/MM/YYYY',
               required: true,
               autocomplete: true,
             },
@@ -1321,7 +1321,7 @@ async function registerSlashCommands(channel) {
             {
               type: ApplicationCommandOptionType.String,
               name: 'end_date',
-              description: 'End date: DD/MM/YYYY [AD|BC] (optional)',
+              description: 'End date: DD/MM/YYYY (optional)',
               required: false,
               autocomplete: true,
             },
@@ -1436,14 +1436,14 @@ async function registerSlashCommands(channel) {
             {
               type: ApplicationCommandOptionType.String,
               name: 'start_date',
-              description: 'New start date: DD/MM/YYYY [AD|BC]',
+              description: 'New start date: DD/MM/YYYY',
               required: false,
               autocomplete: true,
             },
             {
               type: ApplicationCommandOptionType.String,
               name: 'end_date',
-              description: 'New end date: DD/MM/YYYY [AD|BC]',
+              description: 'New end date: DD/MM/YYYY',
               required: false,
               autocomplete: true,
             },
