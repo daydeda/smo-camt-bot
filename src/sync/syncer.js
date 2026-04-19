@@ -48,7 +48,15 @@ function normalizeValue(value) {
 /**
  * Compares two property values and detects if they changed.
  */
+function isEmptyValue(val) {
+  if (val === null || val === undefined || val === '') return true;
+  if (Array.isArray(val) && val.length === 0) return true;
+  return false;
+}
+
 function hasPropertyChanged(oldValue, newValue) {
+  if (isEmptyValue(oldValue) && isEmptyValue(newValue)) return false;
+
   const normalizedOld = normalizeValue(oldValue);
   const normalizedNew = normalizeValue(newValue);
 
@@ -323,21 +331,30 @@ function formatMeetingMinutesField(value) {
 }
 
 function addCommonFields(embed, cardData, departmentRoleMentions = {}) {
-  const departmentText = formatDepartmentWithRoleMention(
-    cardData?.properties?.Department,
-    departmentRoleMentions
-  );
-  const dateText = formatFieldValue(cardData?.properties?.Date);
-  const meetingMinutesText = formatMeetingMinutesField(
-    cardData?.properties?.['รายงานการประชุม (Meeting Minutes)']
-  );
+  const properties = cardData?.properties || {};
 
-  embed.addFields(
-    { name: '🏢 Department', value: truncateFieldValue(departmentText), inline: true },
-    { name: '📅 Date', value: truncateFieldValue(dateText), inline: true }
-  );
+  // 🏢 Department
+  const departmentText = formatDepartmentWithRoleMention(properties.Department, departmentRoleMentions);
+  if (departmentText && departmentText !== 'None') {
+    embed.addFields({
+      name: '🏢 Department',
+      value: truncateFieldValue(departmentText),
+      inline: true,
+    });
+  }
 
-  const projectDraftText = formatFieldValue(cardData?.properties?.['ร่างโครงการ (Project Draft)']);
+  // 📅 Date
+  const dateText = formatFieldValue(properties.Date);
+  if (dateText && dateText !== 'None') {
+    embed.addFields({
+      name: '📅 Date',
+      value: truncateFieldValue(dateText),
+      inline: true,
+    });
+  }
+
+  // 📄 ร่างโครงการ (Project Draft)
+  const projectDraftText = formatFieldValue(properties['ร่างโครงการ (Project Draft)']);
   if (projectDraftText && projectDraftText !== 'None') {
     embed.addFields({
       name: '📄 ร่างโครงการ (Project Draft)',
@@ -346,11 +363,17 @@ function addCommonFields(embed, cardData, departmentRoleMentions = {}) {
     });
   }
 
-  embed.addFields({
-    name: '📝 รายงานการประชุม (Meeting Minutes)',
-    value: truncateFieldValue(meetingMinutesText),
-    inline: false,
-  });
+  // 📝 รายงานการประชุม (Meeting Minutes)
+  const meetingMinutesText = formatMeetingMinutesField(
+    properties['รายงานการประชุม (Meeting Minutes)']
+  );
+  if (meetingMinutesText && meetingMinutesText !== 'None') {
+    embed.addFields({
+      name: '📝 รายงานการประชุม (Meeting Minutes)',
+      value: truncateFieldValue(meetingMinutesText),
+      inline: false,
+    });
+  }
 }
 
 function addSupportFooter(embed) {
