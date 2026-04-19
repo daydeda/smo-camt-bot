@@ -334,13 +334,23 @@ function addCommonFields(embed, cardData, departmentRoleMentions = {}) {
 
   embed.addFields(
     { name: '🏢 Department', value: truncateFieldValue(departmentText), inline: true },
-    { name: '📅 Date', value: truncateFieldValue(dateText), inline: true },
-    {
-      name: '📝 รายงานการประชุม (Meeting Minutes)',
-      value: truncateFieldValue(meetingMinutesText),
-      inline: false,
-    }
+    { name: '📅 Date', value: truncateFieldValue(dateText), inline: true }
   );
+
+  const projectDraftText = formatFieldValue(cardData?.properties?.['ร่างโครงการ (Project Draft)']);
+  if (projectDraftText && projectDraftText !== 'None') {
+    embed.addFields({
+      name: '📄 ร่างโครงการ (Project Draft)',
+      value: truncateFieldValue(projectDraftText),
+      inline: false,
+    });
+  }
+
+  embed.addFields({
+    name: '📝 รายงานการประชุม (Meeting Minutes)',
+    value: truncateFieldValue(meetingMinutesText),
+    inline: false,
+  });
 }
 
 function addSupportFooter(embed) {
