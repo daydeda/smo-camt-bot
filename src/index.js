@@ -1043,7 +1043,7 @@ function buildTimeAutocompleteChoices(focusedValue = '') {
 }
 
 async function handleTaskAutocomplete(interaction) {
-  if (interaction.commandName !== 'task') {
+  if (interaction.commandName !== 'task' && interaction.commandName !== 'calendar') {
     return;
   }
 
@@ -1185,13 +1185,22 @@ async function runReminderCheck(channels) {
   return reminderCounts;
 }
 
-async function runCalendarOverview(channels, range = 'week', now = new Date()) {
+async function runCalendarOverview(channels, range = 'week', now = new Date(), departmentFilter = null) {
   const cards = await fetchDatabaseCards();
   const formattedCards = cards.map(formatCardForTracking);
 
   for (const channel of channels) {
-    const channelTrackedCards = filterCardsForChannel(formattedCards, channel.id);
-    const embeds = createCalendarOverviewEmbeds(channelTrackedCards, range, now);
+    let channelTrackedCards = filterCardsForChannel(formattedCards, channel.id);
+
+    if (departmentFilter) {
+      const filters = parseCommaSeparatedLookupValues(departmentFilter);
+      channelTrackedCards = filterCardsByDepartmentFilters(channelTrackedCards, filters);
+    }
+
+    const titlePrefix = departmentFilter ? `📅 Calendar: ${departmentFilter}` : null;
+    const embeds = createCalendarOverviewEmbeds(channelTrackedCards, range, now, {
+      title: titlePrefix,
+    });
     await sendEmbedsToChannel(channel, embeds, { singleMessage: true });
   }
 }
@@ -1278,6 +1287,13 @@ async function registerSlashCommands(channel) {
             { name: 'week', value: 'week' },
             { name: 'month', value: 'month' },
           ],
+        },
+        {
+          name: 'department',
+          description: 'Filter by department (optional)',
+          type: 3,
+          required: false,
+          autocomplete: true,
         },
       ],
     },
@@ -1583,8 +1599,10 @@ function registerCommandHandlers() {
 
       if (interaction.commandName === 'calendar') {
         const range = interaction.options.getString('range', true);
-        await runCalendarOverview(targetChannels, range, new Date());
-        await interaction.editReply(`Calendar overview (${range}) posted.`);
+        const department = interaction.options.getString('department');
+        await runCalendarOverview(targetChannels, range, new Date(), department);
+        const departmentSuffix = department ? ` for ${department}` : '';
+        await interaction.editReply(`Calendar overview (${range})${departmentSuffix} posted.`);
       }
 
       if (interaction.commandName === 'clear') {
