@@ -508,12 +508,19 @@ function isDueInOneDay(deadlineRaw, deadlineDate, statusBucket, now, nowDateOnly
   return reminderDate.getTime() === nowDateOnly.getTime();
 }
 
-function formatDateRangeLabel(start, endExclusive) {
+function formatDateRangeLabel(range, start, endExclusive) {
+  if (range === 'all') {
+    return 'All Time';
+  }
   const end = new Date(endExclusive.getFullYear(), endExclusive.getMonth(), endExclusive.getDate() - 1);
   return `${formatDateLabel(start)} - ${formatDateLabel(end)}`;
 }
 
 function getRangeStart(range, now) {
+  if (range === 'all') {
+    return new Date(0); // Epoch start
+  }
+
   const today = toDateOnly(now);
 
   if (range === 'today') {
@@ -530,6 +537,10 @@ function getRangeStart(range, now) {
 }
 
 function getRangeEndExclusive(range, rangeStart) {
+  if (range === 'all') {
+    return new Date(8640000000000000); // Max possible JS date
+  }
+
   if (range === 'today') {
     return new Date(rangeStart.getFullYear(), rangeStart.getMonth(), rangeStart.getDate() + 1);
   }
@@ -616,10 +627,11 @@ function createCalendarSummaryEmbed(cardsInRange, normalizedRange, now, rangeSta
     today: '📅 Calendar: Today',
     week: '📅 Calendar: This Week',
     month: '📅 Monthly Overview',
+    all: '📅 Calendar: All Tasks',
   };
 
   const headerText = options.title || titleByRange[normalizedRange];
-  const rangeLabel = formatDateRangeLabel(rangeStart, rangeEndExclusive);
+  const rangeLabel = formatDateRangeLabel(normalizedRange, rangeStart, rangeEndExclusive);
   const lines = buildCalendarLines(cardsInRange);
   const visibleLines = lines.slice(0, CALENDAR_MAX_LINES);
 
@@ -670,6 +682,7 @@ function createCalendarDetailedEmbed(cardsInRange, normalizedRange, now, rangeSt
     today: '🗂️ Detailed Schedule: Today',
     week: '🗂️ Detailed Schedule: This Week',
     month: '🗂️ Detailed Schedule: This Month',
+    all: '🗂️ Detailed Schedule: All Tasks',
   };
 
   const grouped = new Map();
@@ -701,7 +714,7 @@ function createCalendarDetailedEmbed(cardsInRange, normalizedRange, now, rangeSt
   }
 
   const embed = new EmbedBuilder()
-    .setTitle(`${titleByRange[normalizedRange]} (${formatDateRangeLabel(rangeStart, rangeEndExclusive)})`)
+    .setTitle(`${titleByRange[normalizedRange]} (${formatDateRangeLabel(normalizedRange, rangeStart, rangeEndExclusive)})`)
     .setColor(0x1B4F72)
     .setDescription(description)
     .setTimestamp(now);
@@ -711,7 +724,7 @@ function createCalendarDetailedEmbed(cardsInRange, normalizedRange, now, rangeSt
 }
 
 export function createCalendarOverviewEmbeds(cards, range = 'week', now = new Date(), options = {}) {
-  const normalizedRange = ['today', 'week', 'month'].includes(range) ? range : 'week';
+  const normalizedRange = ['today', 'week', 'month', 'all'].includes(range) ? range : 'week';
   const { cardsInRange, rangeStart, rangeEndExclusive } = getCardsInRange(cards, normalizedRange, now);
 
   const summaryEmbed = createCalendarSummaryEmbed(

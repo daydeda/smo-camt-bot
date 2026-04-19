@@ -1286,6 +1286,7 @@ async function registerSlashCommands(channel) {
             { name: 'today', value: 'today' },
             { name: 'week', value: 'week' },
             { name: 'month', value: 'month' },
+            { name: 'all', value: 'all' },
           ],
         },
         {
