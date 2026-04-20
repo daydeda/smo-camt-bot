@@ -147,6 +147,42 @@ function cardMatchesDepartmentSet(card, departmentSet) {
   return departments.some(dept => departmentSet.has(normalizeLookupText(dept)));
 }
 
+function getOrganizationValues(properties = {}) {
+  const orgValue = Object.entries(properties).find(
+    ([key]) => key.toLowerCase().includes('organization') || key.toLowerCase().includes('organisation')
+  )?.[1] ?? properties.Organization;
+
+  if (Array.isArray(orgValue)) {
+    return orgValue
+      .map(item => String(item).trim())
+      .filter(Boolean);
+  }
+
+  if (typeof orgValue === 'string') {
+    return orgValue
+      .split(',')
+      .map(item => item.trim())
+      .filter(Boolean);
+  }
+
+  return [];
+}
+
+function cardMatchesOrganizationSet(card, organizationSet) {
+  if (!(organizationSet instanceof Set) || organizationSet.size === 0) {
+    return true;
+  }
+
+  const organizations = getOrganizationValues(card?.properties || {});
+  if (organizations.length === 0) {
+    // If no organization is specified on the card, we consider it a match if "SMO CAMT" is in the filter set,
+    // assuming it's the default.
+    return organizationSet.has(normalizeLookupText('SMO CAMT'));
+  }
+
+  return organizations.some(org => organizationSet.has(normalizeLookupText(org)));
+}
+
 function getChannelDepartmentFilters(channelId) {
   if (Object.hasOwn(config.sync.channelDepartmentsByChannelId, channelId)) {
     return config.sync.channelDepartmentsByChannelId[channelId];
@@ -1185,21 +1221,34 @@ async function runReminderCheck(channels) {
   return reminderCounts;
 }
 
-async function runCalendarOverview(channels, range = 'week', now = new Date(), departmentFilter = null) {
+async function runCalendarOverview(channels, range = 'week', now = new Date(), departmentFilter = null, organizationFilter = null) {
   const cards = await fetchDatabaseCards();
   const formattedCards = cards.map(formatCardForTracking);
 
+  const effectiveOrgFilter = organizationFilter ?? 'SMO CAMT';
+  const orgFilters = parseCommaSeparatedLookupValues(effectiveOrgFilter);
+  const orgSet = toNormalizedDepartmentSet(orgFilters); // Using same normalization/set logic
+
   for (const channel of channels) {
     let channelTrackedCards = filterCardsForChannel(formattedCards, channel.id);
+
+    // Filter by Organization (default to SMO CAMT if not provided)
+    channelTrackedCards = channelTrackedCards.filter(card => cardMatchesOrganizationSet(card, orgSet));
 
     if (departmentFilter) {
       const filters = parseCommaSeparatedLookupValues(departmentFilter);
       channelTrackedCards = filterCardsByDepartmentFilters(channelTrackedCards, filters);
     }
 
-    const titlePrefix = departmentFilter ? `📅 Calendar: ${departmentFilter}` : null;
+    const filterParts = [];
+    if (departmentFilter) filterParts.push(departmentFilter);
+    if (effectiveOrgFilter && effectiveOrgFilter !== 'SMO CAMT') filterParts.push(effectiveOrgFilter);
+    const filterTitle = filterParts.length > 0 ? `: ${filterParts.join(' | ')}` : '';
+    const titlePrefix = `📅 Calendar${filterTitle}`;
+
     const embeds = createCalendarOverviewEmbeds(channelTrackedCards, range, now, {
       title: titlePrefix,
+      organization: effectiveOrgFilter,
     });
     await sendEmbedsToChannel(channel, embeds, { singleMessage: true });
   }
@@ -1292,6 +1341,13 @@ async function registerSlashCommands(channel) {
         {
           name: 'department',
           description: 'Filter by department (optional)',
+          type: 3,
+          required: false,
+          autocomplete: true,
+        },
+        {
+          name: 'organization',
+          description: 'Filter by organization (optional, default: SMO CAMT)',
           type: 3,
           required: false,
           autocomplete: true,
@@ -1601,9 +1657,13 @@ function registerCommandHandlers() {
       if (interaction.commandName === 'calendar') {
         const range = interaction.options.getString('range', true);
         const department = interaction.options.getString('department');
-        await runCalendarOverview(targetChannels, range, new Date(), department);
-        const departmentSuffix = department ? ` for ${department}` : '';
-        await interaction.editReply(`Calendar overview (${range})${departmentSuffix} posted.`);
+        const organization = interaction.options.getString('organization');
+        await runCalendarOverview(targetChannels, range, new Date(), department, organization);
+        const filters = [];
+        if (department) filters.push(`dept: ${department}`);
+        if (organization) filters.push(`org: ${organization}`);
+        const filterSuffix = filters.length > 0 ? ` [${filters.join(', ')}]` : '';
+        await interaction.editReply(`Calendar overview (${range})${filterSuffix} posted.`);
       }
 
       if (interaction.commandName === 'clear') {

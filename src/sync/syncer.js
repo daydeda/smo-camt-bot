@@ -590,6 +590,12 @@ function isDeadlineInsideRange(deadlineRaw, deadlineDate, rangeStart, rangeEndEx
     return false;
   }
 
+  // Range 'all' is detected by rangeStart being Epoch and rangeEnd being max date.
+  // We explicitly return true if the year is reasonable (any year from 1970 onwards).
+  if (rangeStart.getTime() === 0 && rangeEndExclusive.getTime() > 8e15) {
+    return deadlineDate.getFullYear() >= 1970;
+  }
+
   if (isDateTimeValue(deadlineRaw)) {
     const ms = deadlineDate.getTime();
     return ms >= rangeStart.getTime() && ms < rangeEndExclusive.getTime();
@@ -620,7 +626,12 @@ function buildCalendarLines(cardsInRange) {
     const statusText = getStatusLabel(getStatusValue(item.card.properties || {}));
     const dueText = formatFieldValue(item.deadlineRaw || '');
     const taskName = getCardName(item.card);
-    return `• ${dueText} | ${statusText} | ${taskName}`;
+
+    // Try to get a short organization prefix if there are multiple organizations
+    const orgs = getOrganizationValues(item.card.properties || {});
+    const orgPrefix = orgs.length > 0 ? `[${orgs[0].slice(0, 8)}] ` : '';
+
+    return `• ${dueText} | ${statusText} | ${orgPrefix}${taskName}`;
   });
 }
 
@@ -691,12 +702,19 @@ function createCalendarSummaryEmbed(cardsInRange, normalizedRange, now, rangeSta
     .setTimestamp(now)
     .addFields(
       { name: 'Total Scheduled Tasks', value: String(cardsInRange.length), inline: true },
-      { name: 'Range', value: normalizedRange, inline: true },
-      { name: 'Not Started', value: String(statusCounts.notStarted), inline: true },
-      { name: 'In Progress', value: String(statusCounts.inProgress), inline: true },
-      { name: 'In Review', value: String(statusCounts.inReview), inline: true },
-      { name: 'Done', value: String(statusCounts.done), inline: true }
+      { name: 'Range', value: normalizedRange, inline: true }
     );
+
+  if (options.organization) {
+    embed.addFields({ name: 'Organization', value: options.organization, inline: true });
+  }
+
+  embed.addFields(
+    { name: 'Not Started', value: String(statusCounts.notStarted), inline: true },
+    { name: 'In Progress', value: String(statusCounts.inProgress), inline: true },
+    { name: 'In Review', value: String(statusCounts.inReview), inline: true },
+    { name: 'Done', value: String(statusCounts.done), inline: true }
+  );
 
   if (visibleLines.length === 0) {
     embed.setDescription('No scheduled tasks in this range.');
