@@ -590,10 +590,10 @@ function isDeadlineInsideRange(deadlineRaw, deadlineDate, rangeStart, rangeEndEx
     return false;
   }
 
-  // Range 'all' is detected by rangeStart being Epoch and rangeEnd being max date.
-  // We explicitly return true if the year is reasonable (any year from 1970 onwards).
-  if (rangeStart.getTime() === 0 && rangeEndExclusive.getTime() > 8e15) {
-    return deadlineDate.getFullYear() >= 1970;
+  // Range 'all' is handled by checking a special condition.
+  // If either range bounds suggest 'All Time', we include everything with a date.
+  if (rangeStart.getTime() <= 0 && rangeEndExclusive.getTime() > 1e15) {
+    return true;
   }
 
   if (isDateTimeValue(deadlineRaw)) {

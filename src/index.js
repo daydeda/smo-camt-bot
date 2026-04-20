@@ -1225,15 +1225,16 @@ async function runCalendarOverview(channels, range = 'week', now = new Date(), d
   const cards = await fetchDatabaseCards();
   const formattedCards = cards.map(formatCardForTracking);
 
-  const effectiveOrgFilter = organizationFilter ?? 'SMO CAMT';
-  const orgFilters = parseCommaSeparatedLookupValues(effectiveOrgFilter);
-  const orgSet = toNormalizedDepartmentSet(orgFilters); // Using same normalization/set logic
+  const effectiveOrgFilter = organizationFilter; // No default filter for viewing unless specified
+  const orgSet = effectiveOrgFilter ? toNormalizedDepartmentSet(parseCommaSeparatedLookupValues(effectiveOrgFilter)) : null;
 
   for (const channel of channels) {
     let channelTrackedCards = filterCardsForChannel(formattedCards, channel.id);
 
-    // Filter by Organization (default to SMO CAMT if not provided)
-    channelTrackedCards = channelTrackedCards.filter(card => cardMatchesOrganizationSet(card, orgSet));
+    // Only filter by Organization if explicitly provided in the command
+    if (orgSet && orgSet.size > 0) {
+      channelTrackedCards = channelTrackedCards.filter(card => cardMatchesOrganizationSet(card, orgSet));
+    }
 
     if (departmentFilter) {
       const filters = parseCommaSeparatedLookupValues(departmentFilter);
@@ -1248,7 +1249,7 @@ async function runCalendarOverview(channels, range = 'week', now = new Date(), d
 
     const embeds = createCalendarOverviewEmbeds(channelTrackedCards, range, now, {
       title: titlePrefix,
-      organization: effectiveOrgFilter,
+      organization: effectiveOrgFilter || 'SMO CAMT',
     });
     await sendEmbedsToChannel(channel, embeds, { singleMessage: true });
   }
