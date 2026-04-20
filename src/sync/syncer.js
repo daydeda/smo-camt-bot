@@ -428,6 +428,30 @@ function addCrudAuditField(embed, cardData, actionLabel, fallbackSource = 'Notio
   });
 }
 
+function getOrganizationValues(properties = {}) {
+  const orgValue = Object.entries(properties).find(
+    ([key]) => {
+      const low = key.toLowerCase();
+      return low.includes('organization') || low.includes('organisation') || low === 'องค์กร';
+    }
+  )?.[1];
+
+  if (Array.isArray(orgValue)) {
+    return orgValue
+      .map(item => String(item).trim())
+      .filter(Boolean);
+  }
+
+  if (typeof orgValue === 'string') {
+    return orgValue
+      .split(',')
+      .map(item => item.trim())
+      .filter(Boolean);
+  }
+
+  return [];
+}
+
 function getCardName(card) {
   let cardName = card?.properties?.['กิจกรรม'];
 
@@ -449,17 +473,14 @@ function normalizeStatusText(value) {
 }
 
 function getStatusValue(properties = {}) {
-  const exactStatus = properties.Status;
-  if (typeof exactStatus === 'string') {
-    return exactStatus;
-  }
+  const statusValue = Object.entries(properties).find(
+    ([key]) => {
+      const low = key.toLowerCase();
+      return low === 'status' || low === 'state' || low === 'เบอร์' || low === 'สถานะ';
+    }
+  )?.[1];
 
-  const statusKey = Object.keys(properties).find(key => key.toLowerCase().includes('status'));
-  if (statusKey && typeof properties[statusKey] === 'string') {
-    return properties[statusKey];
-  }
-
-  return null;
+  return typeof statusValue === 'string' ? statusValue : null;
 }
 
 function mapStatusBucket(statusText) {
