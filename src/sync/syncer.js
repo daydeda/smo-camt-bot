@@ -494,21 +494,29 @@ function mapStatusBucket(statusText) {
   return null;
 }
 
-function getDeadlineValue(properties = {}) {
-  if (typeof properties.Date === 'string') {
-    return properties.Date;
-  }
-
-  const deadlineKey = Object.keys(properties).find(key => {
-    const normalized = key.toLowerCase();
-    return normalized.includes('deadline') || normalized.includes('due') || normalized === 'date';
+function getDeadlineValue(properties) {
+  // First try the common English/Thai keywords
+  const entry = Object.entries(properties).find(([key]) => {
+    const low = key.toLowerCase();
+    return (
+      low.includes('deadline') ||
+      low.includes('due') ||
+      low === 'date' ||
+      low === 'วันที่' ||
+      low === 'เวลา'
+    );
   });
 
-  if (!deadlineKey) {
-    return null;
+  if (entry) {
+    return entry[1];
   }
 
-  return typeof properties[deadlineKey] === 'string' ? properties[deadlineKey] : null;
+  // Fallback: look for any property that has the Notion date extraction signature we use
+  const dateEntry = Object.values(properties).find(
+    val => val && typeof val === 'object' && val.type === 'date'
+  );
+
+  return dateEntry || null;
 }
 
 function isOverdue(deadlineRaw, deadlineDate, statusBucket, now, nowDateOnly, deadlineIsDateTime = false) {

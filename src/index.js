@@ -107,7 +107,12 @@ function normalizeLookupText(value) {
 }
 
 function getDepartmentValues(properties = {}) {
-  const departmentValue = properties?.Department;
+  const departmentValue = Object.entries(properties).find(
+    ([key]) => {
+      const low = key.toLowerCase();
+      return low.includes('department') || low.includes('dept') || low === 'ฝ่าย';
+    }
+  )?.[1];
 
   if (Array.isArray(departmentValue)) {
     return departmentValue
@@ -149,8 +154,11 @@ function cardMatchesDepartmentSet(card, departmentSet) {
 
 function getOrganizationValues(properties = {}) {
   const orgValue = Object.entries(properties).find(
-    ([key]) => key.toLowerCase().includes('organization') || key.toLowerCase().includes('organisation')
-  )?.[1] ?? properties.Organization;
+    ([key]) => {
+      const low = key.toLowerCase();
+      return low.includes('organization') || low.includes('organisation') || low === 'องค์กร';
+    }
+  )?.[1];
 
   if (Array.isArray(orgValue)) {
     return orgValue
@@ -828,8 +836,17 @@ function parseCommaSeparatedLookupValues(rawValue) {
   return values;
 }
 
+function getStatusValue(properties = {}) {
+  return (
+    Object.entries(properties).find(([key]) => {
+      const low = key.toLowerCase();
+      return low === 'status' || low === 'state' || low === 'เบอร์' || low === 'สถานะ';
+    })?.[1] || ''
+  );
+}
+
 function getStatusValues(properties = {}) {
-  const statusValue = properties?.Status;
+  const statusValue = getStatusValue(properties);
 
   if (Array.isArray(statusValue)) {
     return statusValue
