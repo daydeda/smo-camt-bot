@@ -1105,32 +1105,33 @@ function createRemovedEmbed(cardName, cardUrl, cardData, departmentRoleMentions 
  * Detects all changes between old and new database states
  * Returns an array of cards that have changed
  */
-export function findChangedCards(oldState, newCards) {
+export function findChangedCards(oldState, trackedCards, allCards = []) {
   const changedCards = [];
   const createdCards = [];
   const deletedCards = [];
   const oldCardIds = oldState.getAllCardIds();
   // Set lookup keeps deletion detection O(n) instead of O(n^2).
-  const newCardIdSet = new Set(newCards.map(card => card.id));
+  const trackedCardIdSet = new Set(trackedCards.map(card => card.id));
+  const allCardIdSet = new Set(allCards.map(card => card.id));
   const isInitialSync = oldCardIds.length === 0;
   let skippedNewCards = 0;
   let isFirstCard = true;
 
-  for (const newCard of newCards) {
-    const oldCard = oldState.getCardState(newCard.id);
+  for (const trackedCard of trackedCards) {
+    const oldCard = oldState.getCardState(trackedCard.id);
 
     if (!oldCard) {
       // Initial import becomes baseline; later unseen cards are true "created" events.
       if (isInitialSync) {
         skippedNewCards += 1;
       } else {
-        createdCards.push(newCard);
+        createdCards.push(trackedCard);
       }
       isFirstCard = false;
       continue;
     }
 
-    const changes = detectChanges(oldCard, newCard, isFirstCard);
+    const changes = detectChanges(oldCard, trackedCard, isFirstCard);
     isFirstCard = false;
 
     if (Object.keys(changes).length > 0) {
@@ -1138,7 +1139,7 @@ export function findChangedCards(oldState, newCards) {
         properties: Object.keys(changes),
       });
       changedCards.push({
-        ...newCard,
+        ...trackedCard,
         changes,
       });
     }
@@ -1146,8 +1147,20 @@ export function findChangedCards(oldState, newCards) {
 
   // Detect deleted cards
   const deletedCardIds = [];
+  const silentRemovedCardIds = [];
+
   for (const oldCardId of oldCardIds) {
-    if (!newCardIdSet.has(oldCardId)) {
+    if (trackedCardIdSet.has(oldCardId)) {
+      continue;
+    }
+
+    // If it's not in trackedCards, it's either deleted from Notion OR just filtered out.
+    if (allCardIdSet.has(oldCardId)) {
+      // Still exists in Notion, just no longer matches our department/scope filters.
+      // We remove it from state silently to avoid noisy notifications.
+      silentRemovedCardIds.push(oldCardId);
+    } else {
+      // Actually gone from Notion.
       deletedCardIds.push(oldCardId);
 
       const removedCard = oldState.getCardState(oldCardId);
@@ -1157,7 +1170,14 @@ export function findChangedCards(oldState, newCards) {
     }
   }
 
-  return { changedCards, createdCards, deletedCards, deletedCardIds, skippedNewCards };
+  return {
+    changedCards,
+    createdCards,
+    deletedCards,
+    deletedCardIds,
+    silentRemovedCardIds,
+    skippedNewCards,
+  };
 }
 
 /**

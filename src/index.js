@@ -1976,14 +1976,15 @@ async function syncNotionToDiscord() {
       createdCards,
       deletedCards,
       deletedCardIds,
+      silentRemovedCardIds,
       skippedNewCards,
-    } = findChangedCards(stateTracker, trackedCards);
+    } = findChangedCards(stateTracker, trackedCards, formattedCards);
     const creationNotifiedByCardId = {
       ...stateTracker.getMeta('creationNotifiedByCardId', {}),
     };
 
     let creationMetaChanged = false;
-    for (const deletedId of deletedCardIds) {
+    for (const deletedId of [...deletedCardIds, ...silentRemovedCardIds]) {
       if (Object.hasOwn(creationNotifiedByCardId, deletedId)) {
         delete creationNotifiedByCardId[deletedId];
         creationMetaChanged = true;
@@ -2021,7 +2022,7 @@ async function syncNotionToDiscord() {
     const trackedDeletedCardIds = deletedCardIds.filter(cardId => trackedDeletedCardIdSet.has(cardId));
 
     console.log(
-      `📈 Sync summary: created=${createdCards.length}, readyForCreateNotice=${readyCreatedCards.length}, blockedForCreateNotice=${blockedCreatedCards.length}, changed=${changedCards.length}, changedNotified=${notifiableChangedCards.length}, deleted=${trackedDeletedCardIds.length}, skippedNew=${skippedNewCards}`
+      `📈 Sync summary: created=${createdCards.length}, readyForCreateNotice=${readyCreatedCards.length}, blockedForCreateNotice=${blockedCreatedCards.length}, changed=${changedCards.length}, changedNotified=${notifiableChangedCards.length}, deleted=${trackedDeletedCardIds.length}, silentRemoved=${silentRemovedCardIds.length}, skippedNew=${skippedNewCards}`
     );
 
     if (blockedCreatedCards.length > 0) {
@@ -2042,8 +2043,8 @@ async function syncNotionToDiscord() {
       console.log(`🗑️  Card deleted: ${deletedId}`);
     }
 
-    if (deletedCardIds.length > 0) {
-      stateTracker.removeCardStates(deletedCardIds);
+    if (deletedCardIds.length > 0 || silentRemovedCardIds.length > 0) {
+      stateTracker.removeCardStates([...deletedCardIds, ...silentRemovedCardIds]);
     }
 
     const now = new Date();
