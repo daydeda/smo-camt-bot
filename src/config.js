@@ -110,6 +110,101 @@ function parsePollInterval(rawValue) {
   return Math.min(Math.max(parsed, MIN_POLL_INTERVAL_SECONDS), MAX_POLL_INTERVAL_SECONDS);
 }
 
+// Parse a comma-separated list of positive day offsets, e.g. "1,3,7".
+function parseReminderLeadDays(rawValue) {
+  const parsed = parseScopeList(rawValue || '', ',')
+    .map(item => parseInt(item, 10))
+    .filter(value => Number.isInteger(value) && value >= 0);
+
+  const unique = Array.from(new Set(parsed));
+  unique.sort((left, right) => left - right);
+
+  // Default to "remind one day before" when nothing valid is configured.
+  return unique.length > 0 ? unique : [1];
+}
+
+// Parse "HH:mm" (24h). Returns { hour, minute } or null when unset/invalid.
+function parseTimeOfDay(rawValue, envName) {
+  if (typeof rawValue !== 'string' || rawValue.trim().length === 0) {
+    return null;
+  }
+
+  const match = rawValue.trim().match(/^([0-1]?\d|2[0-3]):([0-5]\d)$/);
+  if (!match) {
+    throw new Error(`${envName} must be in 24-hour HH:mm format (e.g. 09:00).`);
+  }
+
+  return { hour: parseInt(match[1], 10), minute: parseInt(match[2], 10) };
+}
+
+// Day-of-week name/number to 0(Sun)-6(Sat).
+function parseWeekday(rawValue) {
+  const normalized = typeof rawValue === 'string' ? rawValue.trim().toLowerCase() : '';
+  const names = {
+    sun: 0, sunday: 0,
+    mon: 1, monday: 1,
+    tue: 2, tuesday: 2,
+    wed: 3, wednesday: 3,
+    thu: 4, thursday: 4,
+    fri: 5, friday: 5,
+    sat: 6, saturday: 6,
+  };
+
+  if (Object.hasOwn(names, normalized)) {
+    return names[normalized];
+  }
+
+  const numeric = parseInt(normalized, 10);
+  if (Number.isInteger(numeric) && numeric >= 0 && numeric <= 6) {
+    return numeric;
+  }
+
+  // Default to Monday.
+  return 1;
+}
+
+function parseHealthPort(rawValue) {
+  if (typeof rawValue !== 'string' || rawValue.trim().length === 0) {
+    return 0;
+  }
+
+  const parsed = parseInt(rawValue.trim(), 10);
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 65535) {
+    throw new Error('HEALTH_PORT must be an integer between 0 and 65535 (0 disables the server).');
+  }
+
+  return parsed;
+}
+
+// Parse "Name=discordId,Other Name=discordId2" into { normalizedName: discordId }.
+function parseUserMap(rawValue) {
+  if (typeof rawValue !== 'string' || rawValue.trim().length === 0) {
+    return {};
+  }
+
+  const mapping = {};
+  const entries = rawValue
+    .replace(/\r/g, '')
+    .replace(/\n/g, ',')
+    .split(',')
+    .map(item => item.trim())
+    .filter(Boolean);
+
+  for (const entry of entries) {
+    const match = entry.match(/^(.+?)\s*[=:]\s*(\d+)$/);
+    if (!match) {
+      throw new Error(
+        `Invalid NOTION_DISCORD_USER_MAP entry "${entry}". Use format "Notion Name=discordUserId".`
+      );
+    }
+
+    const normalizedName = match[1].trim().toLowerCase().replace(/[\s_-]+/g, ' ');
+    mapping[normalizedName] = match[2];
+  }
+
+  return mapping;
+}
+
 function ensureNotPlaceholder(value, envName) {
   if (typeof value !== 'string') {
     return;
@@ -132,6 +227,16 @@ const taskCommandRoleNames = parseScopeList(
 );
 const channelDepartmentsByChannelId = parseChannelDepartmentFilters(
   process.env.DISCORD_CHANNEL_DEPARTMENT_FILTERS
+);
+const reminderLeadDays = parseReminderLeadDays(process.env.REMINDER_LEAD_DAYS);
+const dailyDigestTime = parseTimeOfDay(process.env.DAILY_DIGEST_TIME, 'DAILY_DIGEST_TIME');
+const weeklyDigestTime = parseTimeOfDay(process.env.WEEKLY_DIGEST_TIME, 'WEEKLY_DIGEST_TIME');
+const weeklyDigestWeekday = parseWeekday(process.env.WEEKLY_DIGEST_DAY);
+const notionDiscordUserMap = parseUserMap(process.env.NOTION_DISCORD_USER_MAP);
+const assigneeProperties = parseScopeList(
+  process.env.ASSIGNEE_PROPERTIES ||
+    'ผู้รับผิดชอบ,ผู้รับผิดชอบงาน,Assignee,Assignees,Owner,Person',
+  ','
 );
 const config = {
   discord: {
@@ -158,6 +263,22 @@ const config = {
   },
   polling: {
     intervalSeconds: parsePollInterval(process.env.POLL_INTERVAL),
+  },
+  reminders: {
+    leadDays: reminderLeadDays,
+  },
+  schedule: {
+    timezone: (process.env.NOTION_TIMEZONE || 'Asia/Bangkok').trim(),
+    dailyDigestTime,
+    weeklyDigestTime,
+    weeklyDigestWeekday,
+  },
+  health: {
+    port: parseHealthPort(process.env.HEALTH_PORT),
+  },
+  notifications: {
+    notionDiscordUserMap,
+    assigneeProperties,
   },
 };
 

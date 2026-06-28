@@ -1,5 +1,6 @@
 import { EmbedBuilder } from 'discord.js';
 import config from '../config.js';
+import { resolveAssigneeMentions } from '../discord/mentions.js';
 
 const DATE_ONLY_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 const DATETIME_REGEX = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/;
@@ -380,6 +381,21 @@ function addSupportFooter(embed) {
   embed.setFooter({ text: SUPPORT_FOOTER_TEXT });
 }
 
+// Adds a "👤 Assignee" field with Discord mentions when the card's assignees
+// map to Discord users (via NOTION_DISCORD_USER_MAP). No-op otherwise.
+function addAssigneePingField(embed, cardData) {
+  const mentions = resolveAssigneeMentions(cardData);
+  if (mentions.length === 0) {
+    return;
+  }
+
+  embed.addFields({
+    name: '👤 Assignee',
+    value: truncateFieldValue(mentions.join(' ')),
+    inline: false,
+  });
+}
+
 function formatActorDisplay(actorMeta) {
   if (!actorMeta || typeof actorMeta !== 'object') {
     return 'Unknown';
@@ -568,6 +584,28 @@ function isDueInOneDay(deadlineRaw, deadlineDate, statusBucket, now, nowDateOnly
 
   const reminderDate = new Date(deadlineDate.getFullYear(), deadlineDate.getMonth(), deadlineDate.getDate() - 1);
   return reminderDate.getTime() === nowDateOnly.getTime();
+}
+
+// Whole-day difference between a deadline and now. Returns the number of days
+// until the deadline (1 = due in one day), or null when it's already past.
+function getDueInDays(deadlineDate, now, nowDateOnly, deadlineIsDateTime) {
+  if (!deadlineDate) {
+    return null;
+  }
+
+  const dayMs = 24 * 60 * 60 * 1000;
+
+  if (deadlineIsDateTime) {
+    const diffMs = deadlineDate.getTime() - now.getTime();
+    if (diffMs <= 0) {
+      return null;
+    }
+
+    return Math.ceil(diffMs / dayMs);
+  }
+
+  const deadlineDateOnly = toDateOnly(deadlineDate);
+  return Math.round((deadlineDateOnly.getTime() - nowDateOnly.getTime()) / dayMs);
 }
 
 function formatDateRangeLabel(range, start, endExclusive) {
@@ -894,7 +932,12 @@ export function createDeadlineReminderEmbeds(
   now = new Date(),
   options = {}
 ) {
-  const { ignoreDailyLimit = false } = options;
+  const {
+    ignoreDailyLimit = false,
+    leadDays = config.reminders?.leadDays || [1],
+    snoozeStateByCardId = {},
+  } = options;
+  const leadDaySet = new Set(leadDays);
   const embeds = [];
   const updatedReminderStateByCardId = { ...reminderStateByCardId };
   const todayKey = formatDateKey(now);
@@ -909,15 +952,23 @@ export function createDeadlineReminderEmbeds(
     const deadlineIsDateTime = isDateTimeValue(deadlineRaw, { preferEnd: true });
 
     const overdue = isOverdue(deadlineRaw, deadlineDate, statusBucket, now, nowDateOnly, deadlineIsDateTime);
-    const dueInOneDay = isDueInOneDay(
-      deadlineRaw,
-      deadlineDate,
-      statusBucket,
-      now,
-      nowDateOnly,
-      deadlineIsDateTime
-    );
-    if (!overdue && !dueInOneDay) {
+
+    let matchedLeadDay = null;
+    if (!overdue && deadlineDate && statusBucket !== 'done') {
+      const dueInDays = getDueInDays(deadlineDate, now, nowDateOnly, deadlineIsDateTime);
+      if (dueInDays !== null && dueInDays >= 0 && leadDaySet.has(dueInDays)) {
+        matchedLeadDay = dueInDays;
+      }
+    }
+
+    if (!overdue && matchedLeadDay === null) {
+      continue;
+    }
+
+    // Respect a snooze set via the reminder snooze button (date string compare
+    // works for YYYY-MM-DD keys).
+    const snoozedUntil = snoozeStateByCardId[card.id];
+    if (typeof snoozedUntil === 'string' && snoozedUntil >= todayKey) {
       continue;
     }
 
@@ -928,9 +979,15 @@ export function createDeadlineReminderEmbeds(
 
     const cardName = getCardName(card);
     const dueLabel = deadlineRaw ? formatFieldValue(deadlineRaw) : 'None';
-    const description = overdue
-      ? `This card is overdue. Deadline: **${dueLabel}**`
-      : `This card is due in 1 day. Deadline: **${dueLabel}**`;
+    let description;
+    if (overdue) {
+      description = `This card is overdue. Deadline: **${dueLabel}**`;
+    } else if (matchedLeadDay === 0) {
+      description = `This card is due today. Deadline: **${dueLabel}**`;
+    } else {
+      const dayWord = matchedLeadDay === 1 ? 'day' : 'days';
+      description = `This card is due in ${matchedLeadDay} ${dayWord}. Deadline: **${dueLabel}**`;
+    }
 
     const embed = new EmbedBuilder()
       .setTitle(`⏰ Deadline Reminder: ${cardName}`)
@@ -940,6 +997,7 @@ export function createDeadlineReminderEmbeds(
       .setTimestamp(now);
 
     addCommonFields(embed, card, departmentRoleMentions);
+    addAssigneePingField(embed, card);
     addSupportFooter(embed);
 
     embeds.push(embed);
@@ -1005,6 +1063,7 @@ function createChangeEmbed(cardName, cardUrl, changes, cardData, departmentRoleM
 
   embed.setDescription(summaryLines.join('\n'));
   addCommonFields(embed, cardData, departmentRoleMentions);
+  addAssigneePingField(embed, cardData);
   addCrudAuditField(embed, cardData, 'Update');
   addSupportFooter(embed);
 
@@ -1020,6 +1079,7 @@ function createCreatedEmbed(cardName, cardUrl, cardData, departmentRoleMentions 
     .setTimestamp();
 
   addCommonFields(embed, cardData, departmentRoleMentions);
+  addAssigneePingField(embed, cardData);
   addCrudAuditField(embed, cardData, 'Create');
   addSupportFooter(embed);
 

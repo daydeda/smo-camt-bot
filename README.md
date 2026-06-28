@@ -15,6 +15,13 @@ A real-time Discord bot that monitors your Notion Kanban database and posts upda
 ✅ **Calendar Command** - Run /calendar with range `today`, `week`, or `month` to post rich schedule embeds
 ✅ **Clear Command (Admin Only)** - Run /clear to clear all messages in the current configured channel
 ✅ **Task CRUD + Move Commands** - Run /task create|read|update|move|delete to manage and move Notion tasks from Discord
+✅ **Interactive Status Buttons** - Each card notification/reminder has In-Progress / In-Review / Done buttons plus an "Open in Notion" link, so you can change status in one click (same permissions as /task move). The current status button is disabled, and reminders get a **Snooze 1 day** button
+✅ **Scheduled Digests** - Automatic daily report and weekly digest posted at configured local times (DAILY_DIGEST_TIME / WEEKLY_DIGEST_TIME)
+✅ **Configurable Reminder Lead Time** - Set REMINDER_LEAD_DAYS (e.g. `1,3`) to remind multiple days before a deadline
+✅ **Personal Assignee Pings** - Map Notion assignees to Discord users (NOTION_DISCORD_USER_MAP) to @mention them on reminders and updates
+✅ **/help Command** - Self-documenting list of commands and who can use them
+✅ **Health Endpoint** - Optional HTTP endpoint (HEALTH_PORT) reporting last sync time and tracked card count
+✅ **Leveled Logging & Send Retries** - LOG_LEVEL-controlled logs and automatic retry of transient Discord send failures
 ✅ **Monthly Overview** - Auto-posts rich monthly overview on day 1 of each month
 ✅ **Error Resilient** - Gracefully handles API errors and reconnects
 
@@ -93,6 +100,23 @@ POLL_INTERVAL=60
 # TRACKED_DEPARTMENT=ฝ่ายประธาน,ฝ่ายประสาน
 # Optional: channel-specific department filters
 # DISCORD_CHANNEL_DEPARTMENT_FILTERS=1339363141720477791:ฝ่ายประธาน|ฝ่ายประสาน,123456789012345678:ฝ่ายกิจกรรม
+
+# --- Optional: reminders, digests, ops ---
+# Comma-separated days-before-deadline to remind (default: 1). "0,1,3" also reminds on the due day.
+# REMINDER_LEAD_DAYS=1,3
+# Daily digest post time (24h HH:mm, in NOTION_TIMEZONE). Unset = disabled.
+# DAILY_DIGEST_TIME=09:00
+# Weekly digest time + weekday (Mon-Sun or 0-6, Sun=0). Unset time = disabled.
+# WEEKLY_DIGEST_TIME=08:30
+# WEEKLY_DIGEST_DAY=monday
+# Personal pings: map Notion assignee names to Discord user IDs.
+# NOTION_DISCORD_USER_MAP=Somchai=111111111111111111,Alice Example=222222222222222222
+# Property names treated as the assignee (comma-separated). Has sensible defaults.
+# ASSIGNEE_PROPERTIES=ผู้รับผิดชอบ,Assignee,Owner
+# Log verbosity: debug | info | warn | error (default: info).
+# LOG_LEVEL=info
+# Expose an HTTP health endpoint on this port (0/unset = disabled).
+# HEALTH_PORT=8080
 ```
 
 ### 5. Run the Bot
