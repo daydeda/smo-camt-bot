@@ -1,9 +1,18 @@
 import { Client as NotionClient } from '@notionhq/client';
 import config from '../config.js';
 
+// @notionhq/client bundles the legacy node-fetch v2, which throws
+// "Premature close" intermittently on Node 18+ (a known transport bug).
+// Node 22/24 ship a far more robust native fetch (undici), so we hand the
+// SDK that instead. The SDK still applies its own timeout via AbortController.
+const nativeFetch = typeof globalThis.fetch === 'function'
+  ? (url, init) => globalThis.fetch(url, init)
+  : undefined;
+
 const notion = new NotionClient({
   auth: config.notion.apiKey,
   timeoutMs: 30000,
+  ...(nativeFetch ? { fetch: nativeFetch } : {}),
 });
 
 const DEFAULT_MAX_RETRIES = 5;
@@ -20,10 +29,17 @@ const RETRYABLE_ERROR_PATTERNS = [
   'econnrefused',
   'enotfound',
   'eai_again',
+  'epipe',
   'socket hang up',
   'network',
   'fetch failed',
   'request to', // node-fetch "request to <url> failed" wrapper
+  // undici (native fetch) transport errors
+  'terminated',
+  'other side closed',
+  'und_err',
+  'socketerror',
+  'closed',
 ];
 
 function isRetryableNetworkError(error) {
