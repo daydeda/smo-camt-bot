@@ -9,6 +9,10 @@ const PAGE_ID_WITHOUT_HYPHENS_REGEX = /^[0-9a-fA-F]{32}$/;
 const PAGE_ID_WITH_HYPHENS_REGEX =
   /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 const DATABASE_SCHEMA_CACHE_TTL_MS = 5 * 60 * 1000;
+// Notion allows up to 100 rows per query page, but large pages are the main
+// cause of "Premature close" (the body stream is cut off before it finishes).
+// A smaller page means more round-trips but a much higher chance each completes.
+const NOTION_QUERY_PAGE_SIZE = 25;
 const AUTOCOMPLETE_MAX_CHOICES = 25;
 const DEFAULT_ORGANIZATION = 'SMO CAMT';
 
@@ -919,6 +923,9 @@ export async function fetchDatabaseCards() {
         () => notion.databases.query({
           database_id: config.notion.databaseId,
           start_cursor: cursor,
+          // Smaller pages keep each response body small enough to finish
+          // transferring before the connection drops ("Premature close").
+          page_size: NOTION_QUERY_PAGE_SIZE,
         }),
         { label: 'Notion database query' }
       );

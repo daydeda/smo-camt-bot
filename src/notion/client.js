@@ -3,11 +3,12 @@ import config from '../config.js';
 
 const notion = new NotionClient({
   auth: config.notion.apiKey,
-  timeoutMs: 15000,
+  timeoutMs: 30000,
 });
 
-const DEFAULT_MAX_RETRIES = 3;
+const DEFAULT_MAX_RETRIES = 5;
 const BASE_RETRY_DELAY_MS = 500;
+const MAX_RETRY_DELAY_MS = 8000;
 
 // Transient network failures surface as plain fetch errors (no HTTP status), so
 // the Notion SDK's built-in retry (which only covers 429/5xx) never kicks in.
@@ -53,7 +54,7 @@ export async function withNotionRetry(operation, { maxRetries = DEFAULT_MAX_RETR
         throw error;
       }
 
-      const backoff = BASE_RETRY_DELAY_MS * 2 ** attempt;
+      const backoff = Math.min(BASE_RETRY_DELAY_MS * 2 ** attempt, MAX_RETRY_DELAY_MS);
       console.warn(
         `⚠️  ${label} failed (attempt ${attempt + 1}/${maxRetries + 1}): ${error.message}. Retrying in ${backoff}ms...`
       );
