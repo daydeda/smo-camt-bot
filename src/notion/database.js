@@ -1,4 +1,4 @@
-import notion from './client.js';
+import notion, { withNotionRetry } from './client.js';
 import config from '../config.js';
 
 const DATE_ONLY_REGEX = /^\d{4}-\d{2}-\d{2}$/;
@@ -752,9 +752,12 @@ async function getDatabaseSchema() {
     return databaseSchemaCache;
   }
 
-  const schema = await notion.databases.retrieve({
-    database_id: config.notion.databaseId,
-  });
+  const schema = await withNotionRetry(
+    () => notion.databases.retrieve({
+      database_id: config.notion.databaseId,
+    }),
+    { label: 'Notion schema retrieve' }
+  );
 
   databaseSchemaCache = schema;
   databaseSchemaFetchedAt = now;
@@ -786,7 +789,10 @@ async function getPageTitle(pageId, titleCache) {
   }
 
   try {
-    const page = await notion.pages.retrieve({ page_id: pageId });
+    const page = await withNotionRetry(
+      () => notion.pages.retrieve({ page_id: pageId }),
+      { label: `Notion page retrieve ${pageId.slice(0, 8)}` }
+    );
     const title = extractPageTitleFromProperties(page.properties) || `Untitled (${pageId.slice(0, 8)})`;
     titleCache.set(pageId, title);
     relationTitlePersistentCache.set(pageId, title);
@@ -909,10 +915,13 @@ export async function fetchDatabaseCards() {
     let isFirstPage = true;
 
     while (true) {
-      const response = await notion.databases.query({
-        database_id: config.notion.databaseId,
-        start_cursor: cursor,
-      });
+      const response = await withNotionRetry(
+        () => notion.databases.query({
+          database_id: config.notion.databaseId,
+          start_cursor: cursor,
+        }),
+        { label: 'Notion database query' }
+      );
 
       // Extract relevant properties from each page
       for (const page of response.results) {
