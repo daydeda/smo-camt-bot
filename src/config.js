@@ -163,6 +163,53 @@ function parseWeekday(rawValue) {
   return 1;
 }
 
+const WEEKDAY_NAMES = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
+
+function parseSingleWeekday(token) {
+  const normalized = token.trim().toLowerCase().slice(0, 3);
+  const byName = WEEKDAY_NAMES.indexOf(normalized);
+  if (byName >= 0) return byName;
+
+  const numeric = parseInt(token, 10);
+  return Number.isInteger(numeric) && numeric >= 0 && numeric <= 6 ? numeric : null;
+}
+
+/**
+ * Parse a weekday list such as "mon-fri", "mon,wed,fri", "daily" or "0-6"
+ * into sorted day numbers (Sun=0). Defaults to Monday-Friday.
+ */
+export function parseWeekdayList(rawValue, envName = 'TODO_REMINDER_DAYS') {
+  const value = typeof rawValue === 'string' ? rawValue.trim().toLowerCase() : '';
+  if (!value) return [1, 2, 3, 4, 5];
+  if (value === 'daily' || value === 'all' || value === '*') return [0, 1, 2, 3, 4, 5, 6];
+
+  const days = new Set();
+  for (const token of value.split(',').map(item => item.trim()).filter(Boolean)) {
+    const [fromRaw, toRaw] = token.split('-');
+    const from = parseSingleWeekday(fromRaw);
+    const to = toRaw === undefined ? from : parseSingleWeekday(toRaw);
+    if (from === null || to === null) {
+      throw new Error(`${envName} has an invalid day "${token}". Use e.g. mon-fri or mon,wed,fri.`);
+    }
+
+    // Ranges may wrap around the week, e.g. "sat-mon".
+    for (let day = from; ; day = (day + 1) % 7) {
+      days.add(day);
+      if (day === to) break;
+    }
+  }
+
+  return Array.from(days).sort((left, right) => left - right);
+}
+
+// To-do board reminder time: defaults to 09:00; "off" disables it.
+function parseTodoReminderTime(rawValue) {
+  const value = typeof rawValue === 'string' ? rawValue.trim().toLowerCase() : '';
+  if (!value) return { hour: 9, minute: 0 };
+  if (['off', 'none', 'disabled', 'false', '0'].includes(value)) return null;
+  return parseTimeOfDay(rawValue, 'TODO_REMINDER_TIME');
+}
+
 function parseHealthPort(rawValue) {
   if (typeof rawValue !== 'string' || rawValue.trim().length === 0) {
     return 0;
@@ -232,6 +279,8 @@ const reminderLeadDays = parseReminderLeadDays(process.env.REMINDER_LEAD_DAYS);
 const dailyDigestTime = parseTimeOfDay(process.env.DAILY_DIGEST_TIME, 'DAILY_DIGEST_TIME');
 const weeklyDigestTime = parseTimeOfDay(process.env.WEEKLY_DIGEST_TIME, 'WEEKLY_DIGEST_TIME');
 const weeklyDigestWeekday = parseWeekday(process.env.WEEKLY_DIGEST_DAY);
+const todoReminderTime = parseTodoReminderTime(process.env.TODO_REMINDER_TIME);
+const todoReminderWeekdays = parseWeekdayList(process.env.TODO_REMINDER_DAYS);
 const notionDiscordUserMap = parseUserMap(process.env.NOTION_DISCORD_USER_MAP);
 const assigneeProperties = parseScopeList(
   process.env.ASSIGNEE_PROPERTIES ||
@@ -272,6 +321,8 @@ const config = {
     dailyDigestTime,
     weeklyDigestTime,
     weeklyDigestWeekday,
+    todoReminderTime,
+    todoReminderWeekdays,
   },
   health: {
     port: parseHealthPort(process.env.HEALTH_PORT),

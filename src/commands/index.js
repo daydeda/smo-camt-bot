@@ -47,10 +47,18 @@ import {
   TODO_PREFIX,
   TODO_MODE_BOARD,
   TODO_MODE_PRIVATE,
-  buildTodoView,
-  getDepartmentFromTodoEmbed,
+  compactPageId,
+  getDepartmentFromTodoMessage,
   parseTodoCustomId,
 } from '../discord/todo.js';
+import {
+  buildBoardPayload,
+  recordTodoTick,
+  refreshTodoBoards,
+  registerTodoBoard,
+  renderIntoBoard,
+  takeTodoTick,
+} from '../discord/todoBoards.js';
 
 async function handleHelp(interaction) {
   const allowedRoles = config.permissions.taskCommandRoleNames.join(', ') || 'Admin only';
@@ -486,50 +494,6 @@ async function handleCardActionButton(interaction) {
 
 // ---- Department to-do boards -------------------------------------------------
 
-const TODO_BOARDS_META_KEY = 'todoBoards';
-const MAX_TODO_BOARDS = 50;
-
-function registerTodoBoard(entry) {
-  const boards = stateTracker.getMeta(TODO_BOARDS_META_KEY, []);
-  const next = [...boards.filter(board => board.messageId !== entry.messageId), entry];
-  stateTracker.setMeta(TODO_BOARDS_META_KEY, next.slice(-MAX_TODO_BOARDS));
-}
-
-function unregisterTodoBoard(messageId) {
-  const boards = stateTracker.getMeta(TODO_BOARDS_META_KEY, []);
-  stateTracker.setMeta(
-    TODO_BOARDS_META_KEY,
-    boards.filter(board => board.messageId !== messageId)
-  );
-}
-
-// Re-render every posted board for a department (e.g. after a task was ticked
-// from a private view, or from another board). Failures never block the caller.
-async function refreshTodoBoards(department, cards, { skipMessageId = null } = {}) {
-  const wanted = normalizeLookupText(department);
-  const boards = stateTracker.getMeta(TODO_BOARDS_META_KEY, []);
-
-  for (const board of boards) {
-    if (board.messageId === skipMessageId || normalizeLookupText(board.department) !== wanted) {
-      continue;
-    }
-
-    try {
-      const channel = await discordClient.channels.fetch(board.channelId);
-      const message = await channel.messages.fetch(board.messageId);
-      const view = buildTodoView(cards, board.department, { page: 0, mode: TODO_MODE_BOARD });
-      await message.edit({ embeds: view.embeds, components: view.components });
-    } catch (error) {
-      // 10003 unknown channel, 10008 unknown message: the board was deleted.
-      if (error?.code === 10003 || error?.code === 10008) {
-        unregisterTodoBoard(board.messageId);
-      } else {
-        console.error(`⚠️  Failed to refresh to-do board ${board.messageId}: ${error.message}`);
-      }
-    }
-  }
-}
-
 async function handleTodo(interaction, commandChannel) {
   if (!(await canManageTaskCommands(interaction))) {
     const allowedRoles = config.permissions.taskCommandRoleNames.join(', ');
@@ -541,13 +505,9 @@ async function handleTodo(interaction, commandChannel) {
 
   const department = interaction.options.getString('department', true).trim();
   const cards = await fetchDatabaseCards();
-  const view = buildTodoView(cards, department, { page: 0, mode: TODO_MODE_BOARD });
+  const { view, payload } = buildBoardPayload(cards, department);
 
-  const message = await commandChannel.send({
-    embeds: view.embeds,
-    components: view.components,
-    allowedMentions: { parse: [] },
-  });
+  const message = await commandChannel.send(payload);
   registerTodoBoard({ channelId: commandChannel.id, messageId: message.id, department });
 
   await interaction.editReply(
@@ -564,13 +524,51 @@ async function canTickTodo(interaction, department) {
   return getInteractionRoleNames(interaction).some(name => normalizeLookupText(name) === wanted);
 }
 
+// Private views are ephemeral, so they can only be changed through the
+// interaction. Old-design private views can't take the new layout by edit;
+// send a fresh private view instead.
+async function showPrivateTodoView(interaction, payload) {
+  try {
+    await interaction.editReply(payload);
+  } catch (error) {
+    console.warn(`Private to-do view edit failed (${error.message}); sending a new one.`);
+    await interaction.followUp({ ...payload, flags: payload.flags | MessageFlags.Ephemeral });
+  }
+}
+
+function getCardStatusText(card) {
+  const value = formatScalarReplyValue(card?.properties?.Status);
+  return value === 'None' ? null : value;
+}
+
+// Tick (Done) or untick (Undo) a task from a board. Returns the updated card.
+async function applyTodoToggle(interaction, parsed, department) {
+  const pageId = parsed.pageId;
+
+  if (parsed.action === 'done') {
+    const before = (await fetchDatabaseCards()).find(card => compactPageId(card.id) === compactPageId(pageId));
+    const previousStatus = getCardStatusText(before);
+    const movedCard = await updateDatabaseCard(pageId, { status: 'Done' });
+    recordTodoTick(pageId, {
+      byUserId: interaction.user?.id || null,
+      previousStatus: previousStatus && !normalizeLookupText(previousStatus).includes('done') ? previousStatus : null,
+    });
+    return { card: movedCard, detail: `Status: ${previousStatus || 'None'} -> Done (to-do board: ${department})` };
+  }
+
+  const tick = takeTodoTick(pageId);
+  const restoreStatus = tick?.previousStatus || 'In-Progress';
+  const movedCard = await updateDatabaseCard(pageId, { status: restoreStatus });
+  return { card: movedCard, detail: `Status: Done -> ${restoreStatus} (undo on to-do board: ${department})` };
+}
+
 async function handleTodoButton(interaction) {
   const parsed = parseTodoCustomId(interaction.customId);
   if (!parsed) {
     return;
   }
 
-  const department = getDepartmentFromTodoEmbed(interaction.message?.embeds?.[0]);
+  const department = getDepartmentFromTodoMessage(interaction.message);
   if (!department) {
     await safeEphemeralReply(interaction, 'This to-do board is out of date. Ask an admin to post a new one with `/todo`.');
     return;
@@ -584,13 +582,15 @@ async function handleTodoButton(interaction) {
   if (parsed.action === 'open') {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     const cards = await fetchDatabaseCards();
-    await interaction.editReply(buildTodoView(cards, department, { page: 0, mode: TODO_MODE_PRIVATE }));
+    const { payload } = buildBoardPayload(cards, department, { mode: TODO_MODE_PRIVATE });
+    await showPrivateTodoView(interaction, payload);
     return;
   }
 
   await interaction.deferUpdate();
 
-  if (parsed.action === 'done') {
+  let toggled = null;
+  if (parsed.action === 'done' || parsed.action === 'undo') {
     if (!(await canTickTodo(interaction, department))) {
       await interaction.followUp({
         content: `Only members of the **${department}** role (or task writers/Admins) can tick off these tasks.`,
@@ -599,27 +599,43 @@ async function handleTodoButton(interaction) {
       return;
     }
 
-    const movedCard = await updateDatabaseCard(parsed.pageId, { status: 'Done' });
-    await syncNotionToDiscord();
+    toggled = await applyTodoToggle(interaction, parsed, department);
+  }
 
+  // Redraw first so the click feels instant; slower follow-up work comes after.
+  const cards = await fetchDatabaseCards();
+  const { payload } = buildBoardPayload(cards, department, {
+    mode: parsed.mode,
+    page: parsed.mode === TODO_MODE_BOARD ? 0 : parsed.page ?? 0,
+  });
+
+  let boardMessageId = interaction.message?.id;
+  if (parsed.mode === TODO_MODE_BOARD) {
+    const holder = await renderIntoBoard(interaction.message, payload, department);
+    boardMessageId = holder.id;
+    if (holder.id !== interaction.message.id) {
+      await interaction.followUp({
+        content: `The board moved to the new design: ${holder.url}`,
+        flags: MessageFlags.Ephemeral,
+      });
+    }
+  } else {
+    await showPrivateTodoView(interaction, payload);
+  }
+
+  if (toggled) {
     const auditChannel =
       interaction.channel || (await discordClient.channels.fetch(interaction.channelId));
     await postDiscordCrudAudit(auditChannel, {
       action: 'UPDATE',
       interaction,
-      card: movedCard,
-      details: [`Status -> Done (to-do board: ${department})`],
+      card: toggled.card,
+      details: [toggled.detail],
     });
+    await syncNotionToDiscord();
   }
 
-  const cards = await fetchDatabaseCards();
-  const view = buildTodoView(cards, department, {
-    page: parsed.mode === TODO_MODE_BOARD ? 0 : parsed.page ?? 0,
-    mode: parsed.mode,
-  });
-  await interaction.editReply({ embeds: view.embeds, components: view.components });
-
-  await refreshTodoBoards(department, cards, { skipMessageId: interaction.message?.id });
+  await refreshTodoBoards(department, cards, { skipMessageId: boardMessageId });
 }
 
 const handlers = {

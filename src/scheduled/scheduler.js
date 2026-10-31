@@ -3,11 +3,13 @@ import logger from '../core/logger.js';
 import stateTracker from '../sync/tracker.js';
 import { fetchConfiguredChannels } from '../discord/channels.js';
 import { runDailyDigest, runWeeklyDigest } from './runners.js';
+import { runTodoBoardReminders } from '../discord/todoBoards.js';
 
 const TICK_INTERVAL_MS = 60 * 1000;
 
 const DAILY_META_KEY = 'dailyDigestLastKey';
 const WEEKLY_META_KEY = 'weeklyDigestLastKey';
+const TODO_REMINDER_META_KEY = 'todoReminderLastKey';
 
 /**
  * Break a Date down into wall-clock parts for a given IANA timezone.
@@ -73,13 +75,46 @@ export function shouldRunWeekly(parts, scheduleTime, weekday, lastKey) {
   return parts.minutes >= scheduleTime.hour * 60 + scheduleTime.minute;
 }
 
+// Like shouldRunDaily, but only on the given weekdays (Sun=0).
+export function shouldRunOnWeekdays(parts, scheduleTime, weekdays, lastKey) {
+  if (!Array.isArray(weekdays) || !weekdays.includes(parts.weekday)) {
+    return false;
+  }
+
+  return shouldRunDaily(parts, scheduleTime, lastKey);
+}
+
+function hasAnyScheduledJob() {
+  const { dailyDigestTime, weeklyDigestTime, todoReminderTime } = config.schedule;
+  return Boolean(dailyDigestTime || weeklyDigestTime || todoReminderTime);
+}
+
+async function runTodoReminderJob(parts, now) {
+  const { todoReminderTime, todoReminderWeekdays } = config.schedule;
+  const lastKey = stateTracker.getMeta(TODO_REMINDER_META_KEY, null);
+  if (!shouldRunOnWeekdays(parts, todoReminderTime, todoReminderWeekdays, lastKey)) {
+    return;
+  }
+
+  // Mark first so a failure doesn't re-post every minute for the rest of the day.
+  stateTracker.setMeta(TODO_REMINDER_META_KEY, parts.dateKey);
+  try {
+    const posted = await runTodoBoardReminders(now);
+    logger.info(`📝 To-do board reminders sent: ${posted} (${parts.dateKey}).`);
+  } catch (error) {
+    logger.error(`To-do board reminders failed: ${error.message}`);
+  }
+}
+
 async function runScheduledJobs(now = new Date()) {
   const { timezone, dailyDigestTime, weeklyDigestTime, weeklyDigestWeekday } = config.schedule;
-  if (!dailyDigestTime && !weeklyDigestTime) {
+  if (!hasAnyScheduledJob()) {
     return;
   }
 
   const parts = getZonedParts(now, timezone);
+  await runTodoReminderJob(parts, now);
+
   const runDaily = shouldRunDaily(parts, dailyDigestTime, stateTracker.getMeta(DAILY_META_KEY, null));
   const runWeekly = shouldRunWeekly(
     parts,
@@ -130,9 +165,8 @@ async function runScheduledJobs(now = new Date()) {
  * no scheduled jobs are configured) so callers can clear it on shutdown.
  */
 export function startScheduler() {
-  const { dailyDigestTime, weeklyDigestTime } = config.schedule;
-  if (!dailyDigestTime && !weeklyDigestTime) {
-    logger.info('🗓️  No digest schedule configured (set DAILY_DIGEST_TIME / WEEKLY_DIGEST_TIME).');
+  if (!hasAnyScheduledJob()) {
+    logger.info('🗓️  No scheduled jobs configured (DAILY_DIGEST_TIME / WEEKLY_DIGEST_TIME / TODO_REMINDER_TIME).');
     return null;
   }
 

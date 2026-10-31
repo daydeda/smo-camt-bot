@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { getZonedParts, shouldRunDaily, shouldRunWeekly } from './scheduler.js';
+import { getZonedParts, shouldRunDaily, shouldRunWeekly, shouldRunOnWeekdays } from './scheduler.js';
 
 test('getZonedParts converts to the target timezone wall clock', () => {
   // 02:30 UTC == 09:30 in Asia/Bangkok (UTC+7).
@@ -33,4 +33,14 @@ test('shouldRunWeekly only fires on the target weekday', () => {
   assert.equal(shouldRunWeekly({ dateKey: 'd1', minutes: 520, weekday: 1 }, time, 1, null), true);
   assert.equal(shouldRunWeekly({ dateKey: 'd1', minutes: 520, weekday: 2 }, time, 1, null), false);
   assert.equal(shouldRunWeekly({ dateKey: 'd1', minutes: 520, weekday: 1 }, time, 1, 'd1'), false);
+});
+
+test('shouldRunOnWeekdays skips days outside the list and fires once per day', () => {
+  const time = { hour: 9, minute: 0 };
+  const weekdays = [1, 2, 3, 4, 5];
+  assert.equal(shouldRunOnWeekdays({ dateKey: 'mon', minutes: 545, weekday: 1 }, time, weekdays, null), true);
+  assert.equal(shouldRunOnWeekdays({ dateKey: 'sat', minutes: 545, weekday: 6 }, time, weekdays, null), false);
+  assert.equal(shouldRunOnWeekdays({ dateKey: 'mon', minutes: 545, weekday: 1 }, time, weekdays, 'mon'), false);
+  assert.equal(shouldRunOnWeekdays({ dateKey: 'mon', minutes: 500, weekday: 1 }, time, weekdays, null), false);
+  assert.equal(shouldRunOnWeekdays({ dateKey: 'mon', minutes: 545, weekday: 1 }, null, weekdays, null), false);
 });
