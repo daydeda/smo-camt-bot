@@ -10,7 +10,11 @@ const STATUS_BUTTONS = [
   { status: 'Done', label: 'Done', style: ButtonStyle.Success },
 ];
 
-const PAGE_ID_REGEX = /[0-9a-f]{32}/i;
+// Notion page URLs look like https://www.notion.so/<Title-Slug>-<32 hex id>.
+// The id is always the trailing 32 hex chars of the last path segment. Matching
+// the *first* 32 hex chars is wrong: a slug ending in hex-like text (e.g.
+// "Fix-bug-2" or "Add-feed") shifts the match and yields a bogus page id.
+const TRAILING_PAGE_ID_REGEX = /([0-9a-f]{32})$/i;
 
 function normalizeStatus(value) {
   return typeof value === 'string'
@@ -18,13 +22,21 @@ function normalizeStatus(value) {
     : '';
 }
 
-function extractPageIdFromUrl(url) {
-  if (typeof url !== 'string') {
+export function extractPageIdFromUrl(url) {
+  if (typeof url !== 'string' || url.length === 0) {
     return null;
   }
 
-  const match = url.replace(/-/g, '').match(PAGE_ID_REGEX);
-  return match ? match[0].toLowerCase() : null;
+  let path = url;
+  try {
+    path = new URL(url).pathname;
+  } catch {
+    // Not an absolute URL; treat the raw value as a path.
+  }
+
+  const lastSegment = path.split('/').filter(Boolean).pop() || '';
+  const match = lastSegment.replace(/-/g, '').match(TRAILING_PAGE_ID_REGEX);
+  return match ? match[1].toLowerCase() : null;
 }
 
 function getEmbedData(embed) {

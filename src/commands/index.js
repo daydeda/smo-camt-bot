@@ -42,7 +42,7 @@ import { getTaskUpdatePayloadFromInteraction } from './task/payload.js';
 import { handleTaskAutocomplete } from './task/autocomplete.js';
 import { runReminderCheck, runCalendarOverview } from '../scheduled/runners.js';
 import { syncNotionToDiscord } from '../core/sync.js';
-import { CARD_ACTION_PREFIX, parseCardActionCustomId } from '../discord/actions.js';
+import { CARD_ACTION_PREFIX, extractPageIdFromUrl, parseCardActionCustomId } from '../discord/actions.js';
 
 async function handleHelp(interaction) {
   const allowedRoles = config.permissions.taskCommandRoleNames.join(', ') || 'Admin only';
@@ -446,6 +446,14 @@ async function handleCardActionButton(interaction) {
   const parsed = parseCardActionCustomId(interaction.customId);
   if (!parsed) {
     return;
+  }
+
+  // Cards posted before the page-id parsing fix may carry a wrong id in their
+  // button custom ids. The embed URL on the message is authoritative, so
+  // prefer the id derived from it when available.
+  const embedPageId = extractPageIdFromUrl(interaction.message?.embeds?.[0]?.url);
+  if (embedPageId) {
+    parsed.pageId = embedPageId;
   }
 
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });

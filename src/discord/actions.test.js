@@ -6,6 +6,7 @@ import {
   buildSnoozeCustomId,
   parseCardActionCustomId,
   detectCurrentStatusFromEmbed,
+  extractPageIdFromUrl,
 } from './actions.js';
 
 const PAGE_ID = '1234567890abcdef1234567890abcdef';
@@ -90,4 +91,14 @@ test('status-aware buttons disable the current status', () => {
   const doneButton = buttons.find(button => button.custom_id === buildCardActionCustomId('Done', PAGE_ID));
 
   assert.equal(doneButton.disabled, true);
+});
+
+test('extractPageIdFromUrl takes the trailing id even when the slug looks like hex', () => {
+  const id = '34c6f2983ac180068851d62fb15f219a';
+  assert.equal(extractPageIdFromUrl(`https://www.notion.so/Fix-bug-2-${id}`), id);
+  assert.equal(extractPageIdFromUrl(`https://www.notion.so/Add-feed-${id}`), id);
+  assert.equal(extractPageIdFromUrl(`https://www.notion.so/workspace/Add-feed-${id}?pvs=4`), id);
+  assert.equal(extractPageIdFromUrl(`https://www.notion.so/${id}`), id);
+  assert.equal(extractPageIdFromUrl('https://www.notion.so/No-id-here'), null);
+  assert.equal(extractPageIdFromUrl(undefined), null);
 });
