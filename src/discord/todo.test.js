@@ -61,14 +61,15 @@ test('selectTodoCards keeps only open tasks of the department, earliest deadline
   assert.deepEqual(selectTodoCards(cards, DEPT).map(c => c.id.slice(-1)), ['2', '1', '5']);
 });
 
-test('each task is a checkbox line with a Done button beside it, in a V2 message', () => {
+test('each task is a line with a Done button beside it, in a V2 message', () => {
   const view = buildTodoView([makeCard(1), makeCard(2)], DEPT, { now: NOW, mode: TODO_MODE_BOARD });
   assert.equal(view.flags, MessageFlags.IsComponentsV2);
 
   const { header, sections } = inspect(view);
   assert.ok(header.startsWith(`## 📝 To-do — ${DEPT}`));
   assert.equal(sections.length, 2);
-  assert.ok(sections[0].text.startsWith('⬜'));
+  assert.ok(sections[0].text.startsWith('**1. '));
+  assert.ok(!sections[0].text.includes('⬜'));
   assert.equal(sections[0].button.label, '✓ Done');
   assert.equal(sections[0].button.custom_id, buildTodoCustomId(TODO_MODE_BOARD, 'done', makeCard(1).id, 0));
 });

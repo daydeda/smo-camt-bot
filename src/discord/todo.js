@@ -264,7 +264,7 @@ function formatOpenItem(card, sequence, todayKey, timeZone) {
   const status = formatScalarReplyValue(card?.properties?.Status);
   const urgencyTag = URGENCY_TAGS[getTodoUrgency(card, todayKey, timeZone)] || '';
 
-  return `⬜  **${sequence}. ${heading}**\n-# 🗓️ ${date} • ${status}${urgencyTag}`;
+  return `**${sequence}. ${heading}**\n-# 🗓️ ${date} • ${status}${urgencyTag}`;
 }
 
 function formatTickedItem(card, sequence, tick) {
@@ -285,7 +285,7 @@ function buildHeaderText(department, summary, doneToday) {
 
 /**
  * Build one page of a department's to-do list as a Components V2 message:
- * a checkbox line per task with a Done (or Undo) button beside it.
+ * a line per task with a Done (or Undo) button beside it.
  * Returns { components, flags, page, totalPages, total }. Spread `components`
  * and `flags` into send()/edit()/editReply().
  */
