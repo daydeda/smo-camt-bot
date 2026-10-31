@@ -43,6 +43,14 @@ import { handleTaskAutocomplete } from './task/autocomplete.js';
 import { runReminderCheck, runCalendarOverview } from '../scheduled/runners.js';
 import { syncNotionToDiscord } from '../core/sync.js';
 import { CARD_ACTION_PREFIX, extractPageIdFromUrl, parseCardActionCustomId } from '../discord/actions.js';
+import {
+  TODO_PREFIX,
+  TODO_MODE_BOARD,
+  TODO_MODE_PRIVATE,
+  buildTodoView,
+  getDepartmentFromTodoEmbed,
+  parseTodoCustomId,
+} from '../discord/todo.js';
 
 async function handleHelp(interaction) {
   const allowedRoles = config.permissions.taskCommandRoleNames.join(', ') || 'Admin only';
@@ -57,6 +65,7 @@ async function handleHelp(interaction) {
     '',
     `__Task writers (Admin or roles: ${allowedRoles})__`,
     '• `/task create` — create a Notion task',
+    '• `/todo department:<name>` — post a department to-do board (✅ buttons, paged) the team can tick off',
     '• `/task update` — edit task fields',
     '• `/task move to:<status>` — quick status change',
     '• `/task delete` — archive a task',
@@ -474,7 +483,147 @@ async function handleCardActionButton(interaction) {
   await handleCardMoveButton(interaction, parsed);
 }
 
+
+// ---- Department to-do boards -------------------------------------------------
+
+const TODO_BOARDS_META_KEY = 'todoBoards';
+const MAX_TODO_BOARDS = 50;
+
+function registerTodoBoard(entry) {
+  const boards = stateTracker.getMeta(TODO_BOARDS_META_KEY, []);
+  const next = [...boards.filter(board => board.messageId !== entry.messageId), entry];
+  stateTracker.setMeta(TODO_BOARDS_META_KEY, next.slice(-MAX_TODO_BOARDS));
+}
+
+function unregisterTodoBoard(messageId) {
+  const boards = stateTracker.getMeta(TODO_BOARDS_META_KEY, []);
+  stateTracker.setMeta(
+    TODO_BOARDS_META_KEY,
+    boards.filter(board => board.messageId !== messageId)
+  );
+}
+
+// Re-render every posted board for a department (e.g. after a task was ticked
+// from a private view, or from another board). Failures never block the caller.
+async function refreshTodoBoards(department, cards, { skipMessageId = null } = {}) {
+  const wanted = normalizeLookupText(department);
+  const boards = stateTracker.getMeta(TODO_BOARDS_META_KEY, []);
+
+  for (const board of boards) {
+    if (board.messageId === skipMessageId || normalizeLookupText(board.department) !== wanted) {
+      continue;
+    }
+
+    try {
+      const channel = await discordClient.channels.fetch(board.channelId);
+      const message = await channel.messages.fetch(board.messageId);
+      const view = buildTodoView(cards, board.department, { page: 0, mode: TODO_MODE_BOARD });
+      await message.edit({ embeds: view.embeds, components: view.components });
+    } catch (error) {
+      // 10003 unknown channel, 10008 unknown message: the board was deleted.
+      if (error?.code === 10003 || error?.code === 10008) {
+        unregisterTodoBoard(board.messageId);
+      } else {
+        console.error(`⚠️  Failed to refresh to-do board ${board.messageId}: ${error.message}`);
+      }
+    }
+  }
+}
+
+async function handleTodo(interaction, commandChannel) {
+  if (!(await canManageTaskCommands(interaction))) {
+    const allowedRoles = config.permissions.taskCommandRoleNames.join(', ');
+    await interaction.editReply(
+      `Posting a to-do board requires Admin permission or one of these roles: ${allowedRoles}.`
+    );
+    return;
+  }
+
+  const department = interaction.options.getString('department', true).trim();
+  const cards = await fetchDatabaseCards();
+  const view = buildTodoView(cards, department, { page: 0, mode: TODO_MODE_BOARD });
+
+  const message = await commandChannel.send({
+    embeds: view.embeds,
+    components: view.components,
+    allowedMentions: { parse: [] },
+  });
+  registerTodoBoard({ channelId: commandChannel.id, messageId: message.id, department });
+
+  await interaction.editReply(
+    `To-do board for **${department}** posted (${view.total} open task${view.total === 1 ? '' : 's'}). Pin it so the team can find it.`
+  );
+}
+
+async function canTickTodo(interaction, department) {
+  if (await canManageTaskCommands(interaction)) {
+    return true;
+  }
+
+  const wanted = normalizeLookupText(department);
+  return getInteractionRoleNames(interaction).some(name => normalizeLookupText(name) === wanted);
+}
+
+async function handleTodoButton(interaction) {
+  const parsed = parseTodoCustomId(interaction.customId);
+  if (!parsed) {
+    return;
+  }
+
+  const department = getDepartmentFromTodoEmbed(interaction.message?.embeds?.[0]);
+  if (!department) {
+    await safeEphemeralReply(interaction, 'This to-do board is out of date. Ask an admin to post a new one with `/todo`.');
+    return;
+  }
+
+  if (parsed.action === 'noop') {
+    await interaction.deferUpdate();
+    return;
+  }
+
+  if (parsed.action === 'open') {
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    const cards = await fetchDatabaseCards();
+    await interaction.editReply(buildTodoView(cards, department, { page: 0, mode: TODO_MODE_PRIVATE }));
+    return;
+  }
+
+  await interaction.deferUpdate();
+
+  if (parsed.action === 'done') {
+    if (!(await canTickTodo(interaction, department))) {
+      await interaction.followUp({
+        content: `Only members of the **${department}** role (or task writers/Admins) can tick off these tasks.`,
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    const movedCard = await updateDatabaseCard(parsed.pageId, { status: 'Done' });
+    await syncNotionToDiscord();
+
+    const auditChannel =
+      interaction.channel || (await discordClient.channels.fetch(interaction.channelId));
+    await postDiscordCrudAudit(auditChannel, {
+      action: 'UPDATE',
+      interaction,
+      card: movedCard,
+      details: [`Status -> Done (to-do board: ${department})`],
+    });
+  }
+
+  const cards = await fetchDatabaseCards();
+  const view = buildTodoView(cards, department, {
+    page: parsed.mode === TODO_MODE_BOARD ? 0 : parsed.page ?? 0,
+    mode: parsed.mode,
+  });
+  await interaction.editReply({ embeds: view.embeds, components: view.components });
+
+  await refreshTodoBoards(department, cards, { skipMessageId: interaction.message?.id });
+}
+
 const handlers = {
+  todo: { handle: handleTodo },
   help: { handle: handleHelp },
   mytasks: { handle: handleMyTasks },
   remindercheck: { handle: handleReminderCheck },
@@ -491,12 +640,17 @@ export function registerCommandHandlers() {
     }
 
     if (interaction.isButton()) {
-      if (!interaction.customId.startsWith(CARD_ACTION_PREFIX)) {
+      const isTodoButton = interaction.customId.startsWith(TODO_PREFIX);
+      if (!isTodoButton && !interaction.customId.startsWith(CARD_ACTION_PREFIX)) {
         return;
       }
 
       try {
-        await handleCardActionButton(interaction);
+        if (isTodoButton) {
+          await handleTodoButton(interaction);
+        } else {
+          await handleCardActionButton(interaction);
+        }
       } catch (error) {
         console.error('Error handling card action button:', error.message);
         await safeCommandFailureReply(interaction, 'Action failed. Please check the bot logs.');

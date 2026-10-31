@@ -159,6 +159,7 @@ Changes are posted as Discord embeds with:
 Additionally:
 - Run /remindercheck in any configured Discord channel to test and trigger deadline reminders instantly.
 - Run /calendar range:today|week|month in any configured Discord channel to post rich calendar embeds.
+- Run `/todo department:<name>` (Admin or allowed role) to post a department to-do board. It lists that Notion `Department`'s open tasks (earliest deadline first), 5 per page, each with a ✅ button that marks the task Done in Notion. Anyone with the matching Discord role (or an Admin/allowed role) can tick tasks. **Browse all** opens a private, paged view so paging never changes the shared board; ticking a task refreshes every posted board for that department. Pin the board in the department channel.
 - Run /clear in a configured channel to clear channel messages (admin only).
 - Run `/task create title:<name> department:<comma-separated, guided> [organization:<comma-separated, guided>] start_date:<DD/MM/YYYY [AD|BC]> [end_date] [start_time] [end_time] [status:<guided>]` to create a Notion task (Admin or allowed role).
 - Run `/task read task_title:<title> [id:<page-id-or-url>]` to read a task from Notion.

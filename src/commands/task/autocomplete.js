@@ -81,7 +81,8 @@ export async function handleTaskAutocomplete(interaction) {
   if (
     interaction.commandName !== 'task' &&
     interaction.commandName !== 'calendar' &&
-    interaction.commandName !== 'mytasks'
+    interaction.commandName !== 'mytasks' &&
+    interaction.commandName !== 'todo'
   ) {
     return;
   }

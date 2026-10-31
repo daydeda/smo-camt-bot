@@ -33,6 +33,19 @@ export async function registerSlashCommands(channel) {
       ],
     },
     {
+      name: 'todo',
+      description: 'Post a department to-do board with tick-off buttons and paging (Admin/task writers)',
+      options: [
+        {
+          type: ApplicationCommandOptionType.String,
+          name: 'department',
+          description: 'Department (Notion Department / Discord role name)',
+          required: true,
+          autocomplete: true,
+        },
+      ],
+    },
+    {
       name: 'remindercheck',
       description: 'Run deadline reminder check now and send due/overdue reminders',
     },
