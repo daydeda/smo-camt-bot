@@ -60,6 +60,19 @@ import {
   takeTodoTick,
 } from '../discord/todoBoards.js';
 
+import {
+  ROLE_SELECT_PREFIX,
+  buildRoleSelectPayload,
+  createPanel,
+  getRoleSelectPanel,
+  parseRoleCapSpecs,
+  parseRoleSelectCustomId,
+  releaseRoleMember,
+  resolveRole,
+  saveRoleSelectPanel,
+  toggleRoleMember,
+} from '../discord/roleSelect.js';
+
 async function handleHelp(interaction) {
   const allowedRoles = config.permissions.taskCommandRoleNames.join(', ') || 'Admin only';
   const lines = [
@@ -74,6 +87,7 @@ async function handleHelp(interaction) {
     `__Task writers (Admin or roles: ${allowedRoles})__`,
     '• `/task create` — create a Notion task',
     '• `/todo department:<name>` — post a department to-do board (✅ buttons, paged) the team can tick off',
+    '• `/roleselect roles:<name:cap, ...>` — post a role panel with a member cap per role (e.g. `สวัสดิการ:10, จราจร:15`)',
     '• `/task update` — edit task fields',
     '• `/task move to:<status>` — quick status change',
     '• `/task delete` — archive a task',
@@ -638,7 +652,114 @@ async function handleTodoButton(interaction) {
   await refreshTodoBoards(department, cards, { skipMessageId: boardMessageId });
 }
 
+// ---- Role selection panels ---------------------------------------------------
+
+async function handleRoleSelect(interaction, commandChannel) {
+  if (!(await canManageTaskCommands(interaction))) {
+    const allowedRoles = config.permissions.taskCommandRoleNames.join(', ');
+    await interaction.editReply(
+      `Posting a role panel requires Admin permission or one of these roles: ${allowedRoles}.`
+    );
+    return;
+  }
+
+  const guild = interaction.guild;
+  await guild.roles.fetch();
+
+  const { specs, problems } = parseRoleCapSpecs(interaction.options.getString('roles', true));
+  const roles = [];
+  const seen = new Set();
+
+  for (const spec of specs) {
+    const role = resolveRole(guild, spec.ref);
+    if (!role) {
+      problems.push(`role "${spec.ref}" not found`);
+    } else if (role.id === guild.id || role.managed) {
+      problems.push(`role "${role.name}" cannot be self-assigned`);
+    } else if (!role.editable) {
+      problems.push(`I can't assign "${role.name}" (move my bot role above it in Server Settings > Roles)`);
+    } else if (!seen.has(role.id)) {
+      seen.add(role.id);
+      roles.push({ roleId: role.id, name: role.name, cap: spec.cap });
+    }
+  }
+
+  if (roles.length === 0 || problems.length > 0) {
+    await interaction.editReply(
+      `Nothing posted:\n${problems.map(problem => `• ${problem}`).join('\n') || '• no roles given'}`
+    );
+    return;
+  }
+
+  if (roles.length > 25) {
+    await interaction.editReply('A panel holds at most 25 roles. Split them across two panels.');
+    return;
+  }
+
+  const panel = createPanel({
+    title: interaction.options.getString('title') || '🎭 Role selection',
+    description: interaction.options.getString('description') || '',
+    roles,
+  });
+  const message = await commandChannel.send(buildRoleSelectPayload(panel));
+  saveRoleSelectPanel(message.id, panel);
+
+  await interaction.editReply(`Role panel posted with ${roles.length} role${roles.length === 1 ? '' : 's'}.`);
+}
+
+async function handleRoleSelectButton(interaction) {
+  const parsed = parseRoleSelectCustomId(interaction.customId);
+  const panel = parsed && getRoleSelectPanel(interaction.message.id);
+  if (!panel) {
+    await safeEphemeralReply(interaction, 'This role panel is out of date. Ask an admin to post a new one with `/roleselect`.');
+    return;
+  }
+
+  await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+  const entry = panel.roles.find(role => role.roleId === parsed.roleId);
+  const member = interaction.member;
+  const hasRole = Boolean(member?.roles?.cache?.has(parsed.roleId));
+  const userId = interaction.user.id;
+
+  // State is changed before any await, so two quick clicks can't both take the last spot.
+  const outcome = toggleRoleMember(panel, parsed.roleId, userId, hasRole);
+
+  if (outcome.result === 'full') {
+    saveRoleSelectPanel(interaction.message.id, panel);
+    await interaction.message.edit(buildRoleSelectPayload(panel)).catch(() => {});
+    await interaction.editReply(`Sorry, **${entry.name}** is full (${entry.cap}/${entry.cap}).`);
+    return;
+  }
+
+  try {
+    if (outcome.result === 'joined') {
+      await member.roles.add(parsed.roleId, 'Role selection panel');
+    } else {
+      await member.roles.remove(parsed.roleId, 'Role selection panel');
+    }
+  } catch (error) {
+    // Put our records back the way they were.
+    if (outcome.result === 'joined') {
+      releaseRoleMember(panel, parsed.roleId, userId);
+    } else if (!entry.members.includes(userId)) {
+      entry.members.push(userId);
+    }
+    saveRoleSelectPanel(interaction.message.id, panel);
+    console.error('Role selection failed:', error.message);
+    await interaction.editReply('I could not change your role. An admin needs to check my role permissions.');
+    return;
+  }
+
+  saveRoleSelectPanel(interaction.message.id, panel);
+  await interaction.message.edit(buildRoleSelectPayload(panel)).catch(() => {});
+  await interaction.editReply(
+    outcome.result === 'joined' ? `You now have **${entry.name}**.` : `You gave up **${entry.name}**.`
+  );
+}
+
 const handlers = {
+  roleselect: { handle: handleRoleSelect },
   todo: { handle: handleTodo },
   help: { handle: handleHelp },
   mytasks: { handle: handleMyTasks },
@@ -657,12 +778,15 @@ export function registerCommandHandlers() {
 
     if (interaction.isButton()) {
       const isTodoButton = interaction.customId.startsWith(TODO_PREFIX);
-      if (!isTodoButton && !interaction.customId.startsWith(CARD_ACTION_PREFIX)) {
+      const isRoleSelectButton = interaction.customId.startsWith(ROLE_SELECT_PREFIX);
+      if (!isTodoButton && !isRoleSelectButton && !interaction.customId.startsWith(CARD_ACTION_PREFIX)) {
         return;
       }
 
       try {
-        if (isTodoButton) {
+        if (isRoleSelectButton) {
+          await handleRoleSelectButton(interaction);
+        } else if (isTodoButton) {
           await handleTodoButton(interaction);
         } else {
           await handleCardActionButton(interaction);

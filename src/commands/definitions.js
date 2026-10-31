@@ -46,6 +46,30 @@ export async function registerSlashCommands(channel) {
       ],
     },
     {
+      name: 'roleselect',
+      description: 'Post a role selection panel with a member cap per role (Admin/task writers)',
+      options: [
+        {
+          type: ApplicationCommandOptionType.String,
+          name: 'roles',
+          description: 'Roles and caps, comma-separated, e.g. สวัสดิการ:10, จราจร:15, Media (no cap = unlimited)',
+          required: true,
+        },
+        {
+          type: ApplicationCommandOptionType.String,
+          name: 'title',
+          description: 'Panel title (optional)',
+          required: false,
+        },
+        {
+          type: ApplicationCommandOptionType.String,
+          name: 'description',
+          description: 'Text shown above the role list (optional)',
+          required: false,
+        },
+      ],
+    },
+    {
       name: 'remindercheck',
       description: 'Run deadline reminder check now and send due/overdue reminders',
     },
