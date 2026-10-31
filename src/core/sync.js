@@ -33,9 +33,28 @@ import {
   hydrateHardDedupeHistoryFromDiscord,
 } from '../sync/dedupe.js';
 import { runMonthlyOverview } from '../scheduled/runners.js';
+import { refreshTodoBoards } from '../discord/todoBoards.js';
+import { getDepartmentValues } from '../sync/filters.js';
 import { recordSyncSuccess, recordSyncFailure } from './health.js';
 
 let isRunning = false;
+
+async function refreshBoardsForChangedDepartments(changedCards, allCards) {
+  const departments = new Set();
+  for (const card of changedCards) {
+    for (const department of getDepartmentValues(card?.properties || {})) {
+      departments.add(department);
+    }
+  }
+
+  for (const department of departments) {
+    try {
+      await refreshTodoBoards(department, allCards);
+    } catch (error) {
+      console.error(`To-do board refresh failed for ${department}: ${error.message}`);
+    }
+  }
+}
 
 /**
  * Main sync loop - fetches Notion database and posts changes to Discord
@@ -341,6 +360,13 @@ export async function syncNotionToDiscord() {
     if (creationMetaChanged) {
       stateTracker.setMeta('creationNotifiedByCardId', creationNotifiedByCardId);
     }
+
+    // Keep to-do boards in step with Notion: refresh the boards of every
+    // department that had a change this cycle. Never let this block sync.
+    await refreshBoardsForChangedDepartments(
+      [...createdCards, ...changedCards, ...trackedDeletedCards],
+      formattedCards
+    );
 
     // Update tracker with current state
     stateTracker.setCardStates(trackedCards);
