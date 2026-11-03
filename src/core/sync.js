@@ -33,7 +33,7 @@ import {
   hydrateHardDedupeHistoryFromDiscord,
 } from '../sync/dedupe.js';
 import { runMonthlyOverview } from '../scheduled/runners.js';
-import { refreshTodoBoards } from '../discord/todoBoards.js';
+import { consumeTodoChangeNotice, refreshTodoBoards } from '../discord/todoBoards.js';
 import { getDepartmentValues } from '../sync/filters.js';
 import { recordSyncSuccess, recordSyncFailure } from './health.js';
 
@@ -127,7 +127,8 @@ export async function syncNotionToDiscord() {
     });
 
     // Detail updates should always notify for tracked existing cards, regardless of create-notice state.
-    const notifiableChangedCards = changedCards;
+    // Changes made by ticking a to-do board are not posted: the board already shows them.
+    const notifiableChangedCards = changedCards.filter(card => !consumeTodoChangeNotice(card.id));
 
     const trackedDeletedCards = deletedCards.filter(card => cardMatchesDepartmentSet(card, syncScopeDepartmentSet));
     const trackedDeletedCardIdSet = new Set(trackedDeletedCards.map(card => card.id));

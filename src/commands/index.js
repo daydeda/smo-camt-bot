@@ -57,6 +57,7 @@ import {
   refreshTodoBoards,
   registerTodoBoard,
   renderIntoBoard,
+  suppressTodoChangeNotice,
   takeTodoTick,
 } from '../discord/todoBoards.js';
 
@@ -555,12 +556,33 @@ function getCardStatusText(card) {
   return value === 'None' ? null : value;
 }
 
+// Recently fetched Notion cards, reused by to-do buttons so a click doesn't
+// trigger a full database scan each time. Refresh always fetches fresh data.
+const TODO_CARD_CACHE_MS = 60_000;
+let todoCardCache = null;
+
+async function getTodoCards({ fresh = false } = {}) {
+  if (!fresh && todoCardCache && Date.now() - todoCardCache.at < TODO_CARD_CACHE_MS) {
+    return todoCardCache.cards;
+  }
+
+  const cards = await fetchDatabaseCards();
+  todoCardCache = { cards, at: Date.now() };
+  return cards;
+}
+
+function replaceCachedCard(cards, updatedCard) {
+  if (!updatedCard) return cards;
+  const id = compactPageId(updatedCard.id);
+  return cards.map(card => (compactPageId(card.id) === id ? updatedCard : card));
+}
+
 // Tick (Done) or untick (Undo) a task from a board. Returns the updated card.
-async function applyTodoToggle(interaction, parsed, department) {
+async function applyTodoToggle(interaction, parsed, department, cards) {
   const pageId = parsed.pageId;
 
   if (parsed.action === 'done') {
-    const before = (await fetchDatabaseCards()).find(card => compactPageId(card.id) === compactPageId(pageId));
+    const before = cards.find(card => compactPageId(card.id) === compactPageId(pageId));
     const previousStatus = getCardStatusText(before);
     const movedCard = await updateDatabaseCard(pageId, { status: 'Done' });
     recordTodoTick(pageId, {
@@ -595,7 +617,7 @@ async function handleTodoButton(interaction) {
 
   if (parsed.action === 'open') {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-    const cards = await fetchDatabaseCards();
+    const cards = await getTodoCards();
     const { payload } = buildBoardPayload(cards, department, { mode: TODO_MODE_PRIVATE });
     await showPrivateTodoView(interaction, payload);
     return;
@@ -604,6 +626,7 @@ async function handleTodoButton(interaction) {
   await interaction.deferUpdate();
 
   let toggled = null;
+  let cards = await getTodoCards({ fresh: parsed.action === 'refresh' });
   if (parsed.action === 'done' || parsed.action === 'undo') {
     if (!(await canTickTodo(interaction, department))) {
       await interaction.followUp({
@@ -613,11 +636,14 @@ async function handleTodoButton(interaction) {
       return;
     }
 
-    toggled = await applyTodoToggle(interaction, parsed, department);
+    toggled = await applyTodoToggle(interaction, parsed, department, cards);
+    suppressTodoChangeNotice(parsed.pageId);
+    // Patch the cached list with the updated card instead of re-scanning Notion.
+    cards = replaceCachedCard(cards, toggled.card);
+    todoCardCache = { cards, at: Date.now() };
   }
 
   // Redraw first so the click feels instant; slower follow-up work comes after.
-  const cards = await fetchDatabaseCards();
   const { payload } = buildBoardPayload(cards, department, {
     mode: parsed.mode,
     page: parsed.mode === TODO_MODE_BOARD ? 0 : parsed.page ?? 0,
@@ -637,19 +663,14 @@ async function handleTodoButton(interaction) {
     await showPrivateTodoView(interaction, payload);
   }
 
-  if (toggled) {
-    const auditChannel =
-      interaction.channel || (await discordClient.channels.fetch(interaction.channelId));
-    await postDiscordCrudAudit(auditChannel, {
-      action: 'UPDATE',
-      interaction,
-      card: toggled.card,
-      details: [toggled.detail],
-    });
-    await syncNotionToDiscord();
-  }
-
+  // Other boards for this department are refreshed from the same cards.
   await refreshTodoBoards(department, cards, { skipMessageId: boardMessageId });
+
+  // Extra channel posts (audit embed, sync embeds) would push the board up the
+  // channel, so they run after the board is already redrawn and are not awaited.
+  if (toggled) {
+    syncNotionToDiscord().catch(error => console.error(`Sync after to-do tick failed: ${error.message}`));
+  }
 }
 
 // ---- Role selection panels ---------------------------------------------------

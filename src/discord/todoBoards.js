@@ -78,6 +78,26 @@ export function takeTodoTick(pageId, now = new Date()) {
   return tick;
 }
 
+// ---- change notices suppressed for board clicks -----------------------------
+// A tick on a board already redraws the board, so the Notion change it causes
+// shouldn't also post an embed into the channel (it would push the board up).
+// Entries expire quickly; the tracker still saves the new state.
+const SUPPRESS_NOTICE_MS = 5 * 60_000;
+const suppressedNoticeUntil = new Map();
+
+export function suppressTodoChangeNotice(pageId, now = Date.now()) {
+  suppressedNoticeUntil.set(compactPageId(pageId), now + SUPPRESS_NOTICE_MS);
+}
+
+/** True (once) when a card's change came from a board click and should not be posted. */
+export function consumeTodoChangeNotice(pageId, now = Date.now()) {
+  const id = compactPageId(pageId);
+  const until = suppressedNoticeUntil.get(id);
+  if (until === undefined) return false;
+  suppressedNoticeUntil.delete(id);
+  return until > now;
+}
+
 // ---- rendering into Discord --------------------------------------------------
 
 export function buildBoardPayload(cards, department, { now = new Date(), mode = TODO_MODE_BOARD, page = 0 } = {}) {
