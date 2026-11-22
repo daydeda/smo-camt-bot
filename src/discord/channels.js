@@ -20,6 +20,20 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// Forum channels cannot receive plain messages; every post is a new thread.
+export function isForumChannel(channel) {
+  return typeof channel?.send !== 'function' && typeof channel?.threads?.create === 'function';
+}
+
+const THREAD_NAME_MAX_LENGTH = 100;
+
+export function buildForumThreadName(payload) {
+  const embed = payload?.embeds?.[0];
+  const raw = embed?.data?.title || embed?.title || 'Task update';
+  const cleaned = String(raw).replace(/\s+/g, ' ').trim();
+  return (cleaned || 'Task update').slice(0, THREAD_NAME_MAX_LENGTH);
+}
+
 // Send a message with bounded retries for transient Discord failures.
 // Rate-limit (429) and 5xx errors are retried with backoff; other errors throw.
 async function sendWithRetry(channel, payload) {
@@ -27,6 +41,13 @@ async function sendWithRetry(channel, payload) {
 
   for (let attempt = 1; attempt <= SEND_MAX_ATTEMPTS; attempt += 1) {
     try {
+      if (isForumChannel(channel)) {
+        return await channel.threads.create({
+          name: buildForumThreadName(payload),
+          message: payload,
+        });
+      }
+
       return await channel.send(payload);
     } catch (error) {
       lastError = error;
@@ -56,7 +77,7 @@ export async function fetchConfiguredChannels() {
   for (const channelId of config.discord.channelIds) {
     try {
       const channel = await discordClient.channels.fetch(channelId);
-      if (!channel || typeof channel.send !== 'function') {
+      if (!channel || (typeof channel.send !== 'function' && !isForumChannel(channel))) {
         console.warn(`⚠️  Skipping non-text or unavailable channel: ${channelId}`);
         continue;
       }
